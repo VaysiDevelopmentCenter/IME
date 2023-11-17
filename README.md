@@ -17,9 +17,13 @@
   ### Key Features
 
   - Adaptive Mutation Engine: IME leverages mathematical models, including chaos theory, to create a mutation engine that adapts and evolves based on specific technologies, patterns, and algorithms.
+    
   - Deep Learning Integration: IME seamlessly integrates with deep learning frameworks, enabling dynamic evolution and growth of AI models.
+    
   - Machine Learning Algorithms: IME incorporates a wide range of machine learning algorithms to enhance mutation capabilities and enable diverse exploration of project details.
+    
   - Polymorphic Virus Development: IME provides tools and techniques for creating polymorphic viruses, allowing for sophisticated and evolving malware development.
+    
   - Community-Driven Innovation: This project encourages collaboration and contributions from the community, fostering an environment of knowledge sharing and advancement.
 
   ### Getting Started
