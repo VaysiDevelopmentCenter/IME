@@ -1,4 +1,5 @@
-![Picsart_23-11-16_17-00-44-362](https://github.com/VaysiDevelopmentCenter/IME/assets/151166631/400e2c49-490a-4f50-bdf7-d349524c77db)
+![img_2023101716368](https://github.com/VaysiDevelopmentCenter/IME/assets/151166631/009e8b8b-93c2-4349-8184-6d27969c3ae9)
+
 
 
 # IME
@@ -35,4 +36,4 @@
 
   ---
 
-![Picsart_23-11-16_16-52-11-529](https://github.com/VaysiDevelopmentCenter/IME/assets/151166631/f36a1d1a-4261-46bb-9fab-99a46e2383fc)
+![img_20231017163749](https://github.com/VaysiDevelopmentCenter/IME/assets/151166631/ddccffa0-0893-4d08-b652-eeb6762e3a8e)
