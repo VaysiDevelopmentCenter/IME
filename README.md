@@ -24,7 +24,7 @@
 
   ### Getting Started
 
-  To get started with IME, please refer to the [documentation](docs/) provided in this repository. It contains detailed instructions on installation, usage, and customization.
+  To get started with IME, please refer to the [DOCS.md](docs/) provided in this repository. It contains detailed instructions on installation, usage, and customization.
 
   ### Contribution Guidelines
 
