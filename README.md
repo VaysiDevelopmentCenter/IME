@@ -26,7 +26,7 @@
     
   - Community-Driven Innovation: This project encourages collaboration and contributions from the community, fostering an environment of knowledge sharing and advancement.
 
-**IME Algorithm Comes with Enhanced Features**
+## IME Algorithm Comes with Enhanced Features
 
 The enhanced IME algorithm builds upon the core principles of the original algorithm but introduces several refinements to improve its adaptability, efficiency, and robustness.
 
