@@ -864,36 +864,36 @@ class RepartitionGraphOperator(MutationOperator):
         min_k = max(1, self.min_partitions)
         if min_k > max_k : min_k = max_k
 
-        if max_k == 0:
+        if max_k == 0: # This case should ideally not be reached if num_elements > 0
             print("  Cannot create partitions with max_k=0.")
             return
-        if min_k == 0 and max_k == 0 : # Should be caught by previous line but defensive
+        if min_k == 0 and max_k == 0 :
              print("  min_k and max_k are zero, no partitions to form.")
              return
 
+
         k = random.randint(min_k, max_k)
-        if k == 0 and num_elements > 0 : # If somehow k becomes 0, but there are elements, default to 1 partition
-            k = 1
+        if k == 0 and num_elements > 0 :
+            k = 1 # Default to 1 partition if k somehow becomes 0 with elements present
 
         new_partitions_list: list[set[str]] = [set() for _ in range(k)]
 
-        # Ensure all elements are assigned and partitions (if k <= num_elements) are non-empty.
         temp_elements = list(elements_to_partition_ids)
         random.shuffle(temp_elements)
 
         # Assign first k elements to k distinct partitions to ensure non-emptiness if possible
-        for i in range(k):
-            if temp_elements: # Check if there are elements left to assign
-                new_partitions_list[i].add(temp_elements.pop())
+        # and k <= num_elements
+        if k > 0: # Proceed only if k is positive
+            for i in range(k):
+                if temp_elements:
+                    new_partitions_list[i].add(temp_elements.pop())
 
-        # Assign remaining elements randomly to any of the k partitions
-        for remaining_element_id in temp_elements:
-            if k > 0: # Ensure k is not zero before using randrange
-                 target_partition_idx = random.randrange(k)
-                 new_partitions_list[target_partition_idx].add(remaining_element_id)
-            # else: if k is 0, this loop shouldn't run anyway due to temp_elements being empty.
+            # Assign remaining elements randomly to any of the k partitions
+            for remaining_element_id in temp_elements:
+                target_partition_idx = random.randrange(k) # k is guaranteed > 0 here
+                new_partitions_list[target_partition_idx].add(remaining_element_id)
 
-        final_partitions = [p for p in new_partitions_list if p]
+        final_partitions = [p for p in new_partitions_list if p] # Keep only non-empty sets
 
         if final_partitions:
             schema_name = f"{self.new_schema_name_prefix}_{self.target_element_type}_{str(uuid.uuid4())[:4]}"
@@ -902,9 +902,8 @@ class RepartitionGraphOperator(MutationOperator):
                                        partitions=final_partitions)
             graph.add_partition_schema(new_schema)
             print(f"  Added new PartitionSchema: {new_schema.name} with {len(final_partitions)} partitions.")
-            # print(f"  Partitions: {final_partitions}") # For debugging
         else:
-            print("  No valid partitions were formed.")
+            print("  No valid partitions were formed (all partitions were empty).")
 
 
 class PartitionBasedRewireOperator(MutationOperator):
@@ -916,8 +915,8 @@ class PartitionBasedRewireOperator(MutationOperator):
     def __init__(self, partition_schema_name_or_id: str = None,
                  inter_partition_strategy: str = "random_sparse",
                  intra_partition_strategy: str = "maintain",
-                 connection_density: float = 0.1, # General density for random strategies
-                 default_weight_sampler=lambda: random.uniform(-1,1) # How to sample new weights
+                 connection_density: float = 0.1,
+                 default_weight_sampler=lambda: random.uniform(-1,1)
                  ):
         super().__init__()
         self.partition_schema_name_or_id = partition_schema_name_or_id
@@ -939,9 +938,8 @@ class PartitionBasedRewireOperator(MutationOperator):
 
     def _get_nodes_from_partition(self, graph: NetworkGraph, partition_set: set[str], schema: PartitionSchema) -> list[ArchitecturalNode]:
         """Helper to get actual node objects from a set of IDs in a partition."""
-        if schema.target_element_type == "nodes":
-            return [graph.get_node(node_id) for node_id in partition_set if graph.get_node(node_id) is not None]
-        # Extend for other types later if needed
+        if schema.target_element_type == "nodes": # Ensure schema targets nodes
+            return [node for node_id in partition_set if (node := graph.get_node(node_id)) is not None]
         return []
 
     def apply(self, entity: MutableEntity) -> None:
@@ -956,7 +954,7 @@ class PartitionBasedRewireOperator(MutationOperator):
                 if s_candidate.id == self.partition_schema_name_or_id or s_candidate.name == self.partition_schema_name_or_id:
                     selected_schema = s_candidate
                     break
-        elif graph.partition_schemas:
+        elif graph.partition_schemas: # If no specific schema name, pick one randomly
             selected_schema = random.choice(graph.partition_schemas)
 
         if not selected_schema:
@@ -964,18 +962,11 @@ class PartitionBasedRewireOperator(MutationOperator):
             return
 
         print(f"SRO Stub: Applying {self.__class__.__name__} to graph {graph.id} using PartitionSchema: {selected_schema.name}")
-        # print(f"  Inter-partition strategy: {self.inter_partition_strategy}")
-        # print(f"  Intra-partition strategy: {self.intra_partition_strategy}")
-
-        # --- Placeholder for actual rewiring logic ---
-        # This would be very complex. For demonstration, let's imagine one simple strategy:
-        # If inter_partition_strategy is "random_sparse", add a few random edges between partitions.
 
         if selected_schema.target_element_type != "nodes":
             print(f"  Skipping: Rewiring currently only implemented for node-based partitions. Schema is for '{selected_schema.target_element_type}'.")
             return
 
-        # Example: Simple inter-partition random sparse connection
         if self.inter_partition_strategy == "random_sparse" and len(selected_schema.partitions) >= 2:
             num_new_edges = 0
             for i in range(len(selected_schema.partitions)):
@@ -983,42 +974,27 @@ class PartitionBasedRewireOperator(MutationOperator):
                     partition1_nodes = self._get_nodes_from_partition(graph, selected_schema.partitions[i], selected_schema)
                     partition2_nodes = self._get_nodes_from_partition(graph, selected_schema.partitions[j], selected_schema)
 
-                    if not partition1_nodes or not partition2_nodes:
-                        continue
+                    if not partition1_nodes or not partition2_nodes: continue
 
-                    # Add some random connections based on density
-                    # For each pair of nodes (n1 in P1, n2 in P2), add edge with prob=connection_density
                     for n1 in partition1_nodes:
                         for n2 in partition2_nodes:
+                            # Try adding edge from n1 to n2
                             if random.random() < self.connection_density:
-                                # Try adding edge from n1 to n2
                                 new_edge_fwd = ArchitecturalEdge(source_node_id=n1.id, target_node_id=n2.id, weight=self.default_weight_sampler())
-                                try:
-                                    graph.add_edge(new_edge_fwd)
-                                    num_new_edges +=1
-                                except ValueError: # Edge might exist or other issue
-                                    pass
-                                # Try adding edge from n2 to n1 (for non-directed consideration or bi-directional)
-                                if random.random() < self.connection_density: # Separate probability
-                                    new_edge_bwd = ArchitecturalEdge(source_node_id=n2.id, target_node_id=n1.id, weight=self.default_weight_sampler())
-                                    try:
-                                        graph.add_edge(new_edge_bwd)
-                                        num_new_edges +=1
-                                    except ValueError:
-                                        pass
+                                try: graph.add_edge(new_edge_fwd); num_new_edges +=1
+                                except ValueError: pass
+
+                            # Try adding edge from n2 to n1
+                            if random.random() < self.connection_density:
+                                new_edge_bwd = ArchitecturalEdge(source_node_id=n2.id, target_node_id=n1.id, weight=self.default_weight_sampler())
+                                try: graph.add_edge(new_edge_bwd); num_new_edges +=1
+                                except ValueError: pass
             if num_new_edges > 0:
                 print(f"  Added {num_new_edges} new inter-partition edges using 'random_sparse' strategy.")
             else:
                 print(f"  No new inter-partition edges added with 'random_sparse' (density: {self.connection_density}).")
 
-        # TODO: Implement other strategies for inter and intra partition rewiring.
-        # This would involve removing existing edges and/or adding new ones based on the strategy.
-        # For example:
-        # 'full_connect_inter': ensure all nodes in P_i connect to all in P_j.
-        # 'sparsify_intra': randomly remove some existing connections within P_i.
-        # 'maintain_intra': do nothing to connections within P_i.
         print(f"SRO Stub ({self.__class__.__name__}): Placeholder rewiring logic executed.")
-        # --- End Placeholder ---
         pass
 
 # --- Fractal Scale Mutation Operator (FMO) Stubs ---
@@ -1030,94 +1006,45 @@ class HierarchicalNoiseInjectionFMO(MutationOperator):
     of a NetworkGraph, based on the FractalMutationProtocol.
     """
     def __init__(self, base_noise_level: float = 0.05,
-                 target_scales: list[str] = None, # e.g., ["micro", "meso", "macro", "meta"]
-                 decay_factor: float = 0.5): # How noise level might change across scales
+                 target_scales: list[str] = None,
+                 decay_factor: float = 0.5):
         super().__init__()
         self.base_noise_level = base_noise_level
         self.target_scales = target_scales if target_scales is not None else ["micro", "meso"]
-        self.decay_factor = decay_factor # Example of a fractal-like parameter
+        self.decay_factor = decay_factor
 
     def can_apply(self, entity: MutableEntity) -> bool:
         return isinstance(entity.data, NetworkGraph)
 
     def apply(self, entity: MutableEntity) -> None:
-        """
-        Applies noise thematically across specified scales:
-        - Micro (Level 3): Perturb weights/biases in ArchitecturalEdge/Node properties.
-        - Meso (Level 2): E.g., randomly disable/enable a small percentage of nodes in a partition/layer,
-                          or perturb properties of a layer if nodes represent layers.
-        - Macro (Level 1): E.g., slightly alter connectivity density between major partitions,
-                          or add/remove a small number of random edges globally.
-        - Meta (Level 0): E.g., perturb a global property of the NetworkGraph itself,
-                          or (outside this operator) signal the MutationEngine to adjust its own params.
-        The actual noise application would be scaled by base_noise_level and decay_factor.
-        """
-        if not self.can_apply(entity):
-            return
+        if not self.can_apply(entity): return
 
         graph: NetworkGraph = entity.data
-        # Ensure random is available if not already imported globally in the file
-        # import random # Already imported by SimplePol, and used by SROs
-
         print(f"FMO Stub: Applying {self.__class__.__name__} to graph {graph.id}")
         print(f"  Base noise level: {self.base_noise_level}, Target scales: {self.target_scales}")
 
         current_noise_level = self.base_noise_level
-
         if "meta" in self.target_scales:
-            print(f"  META: Perturbing graph.properties (e.g., a global learning rate if stored there).")
-            # Example: if 'learning_rate' in graph.properties:
-            #    if isinstance(graph.properties['learning_rate'], (int, float)):
-            #        graph.properties['learning_rate'] *= (1 + random.uniform(-current_noise_level, current_noise_level))
-            #    else:
-            #        print(f"    Warning: graph.properties['learning_rate'] is not a number.")
-            # else:
-            #    graph.properties['learning_rate_perturbation_factor'] = (1 + random.uniform(-current_noise_level, current_noise_level))
-            #    print(f"    Conceptual: Added 'learning_rate_perturbation_factor' to graph properties.")
+            print(f"  META: Perturbing graph.properties (conceptual).")
             current_noise_level *= self.decay_factor
-
         if "macro" in self.target_scales:
-            print(f"  MACRO: Perturbing overall topology (e.g., add/remove few random global edges, alter partition connectivity rules).")
-            # Example: Add one random edge if possible
-            # if len(graph.nodes) >= 2:
-            #     node_ids = list(graph.nodes.keys())
-            #     source_id = random.choice(node_ids)
-            #     target_id = random.choice(node_ids)
-            #     if source_id != target_id:
-            #         try:
-            #             graph.add_edge(ArchitecturalEdge(source_node_id=source_id, target_node_id=target_id, weight=random.uniform(-0.1,0.1)))
-            #             print(f"    Added a random edge between {source_id} and {target_id}")
-            #         except ValueError: # Edge might exist
-            #             pass
+            print(f"  MACRO: Perturbing overall topology (conceptual).")
             current_noise_level *= self.decay_factor
-
         if "meso" in self.target_scales:
-            print(f"  MESO: Perturbing layer/module properties (e.g., temporarily disable some nodes, alter shared activation functions).")
-            # Example: For each node, small chance to add a 'disabled: True' to its properties.
-            # This would require a PartitionSchema to define layers/modules.
-            # num_nodes_affected = 0
-            # for node_id in graph.nodes:
-            #     if random.random() < current_noise_level * 0.1: # Smaller chance for disabling
-            #         graph.nodes[node_id].properties['temp_disabled_by_meso_noise'] = True
-            #         num_nodes_affected +=1
-            # if num_nodes_affected > 0:
-            #    print(f"    {num_nodes_affected} nodes conceptually marked as 'temp_disabled_by_meso_noise'.")
+            print(f"  MESO: Perturbing layer/module properties (conceptual).")
             current_noise_level *= self.decay_factor
-
         if "micro" in self.target_scales:
-            print(f"  MICRO: Perturbing node/edge properties (e.g., weights, biases).")
+            print(f"  MICRO: Perturbing node/edge properties (weights, biases).")
             num_edges_perturbed = 0
             for edge in graph.edges.values():
                 edge.weight += random.uniform(-current_noise_level, current_noise_level)
                 num_edges_perturbed+=1
-
             num_nodes_perturbed = 0
             for node in graph.nodes.values():
                 if 'bias' in node.properties and isinstance(node.properties['bias'], (int, float)):
                      node.properties['bias'] += random.uniform(-current_noise_level, current_noise_level)
                      num_nodes_perturbed+=1
             print(f"    Applied noise to {num_edges_perturbed} edge weights and {num_nodes_perturbed} node biases (if 'bias' property exists and is numeric).")
-
         print(f"FMO Stub ({self.__class__.__name__}): Placeholder noise injection logic executed.")
         pass
 
@@ -1132,170 +1059,240 @@ class SelfSimilarGrowthFMO(MutationOperator):
                  min_motif_size: int = 2, max_motif_size: int = 5):
         super().__init__()
         self.growth_complexity = growth_complexity
-        self.target_scales = target_scales if target_scales is not None else ["meso"] # Default to meso for adding to layers/modules
+        self.target_scales = target_scales if target_scales is not None else ["meso"]
         self.min_motif_size = min_motif_size
         self.max_motif_size = max_motif_size
 
-
     def can_apply(self, entity: MutableEntity) -> bool:
-        if not isinstance(entity.data, NetworkGraph):
-            return False
+        if not isinstance(entity.data, NetworkGraph): return False
         return len(entity.data.nodes) >= self.min_motif_size
 
     def _find_structural_motif(self, graph: NetworkGraph) -> tuple[list[ArchitecturalNode], list[ArchitecturalEdge]] | None:
-        """
-        (Placeholder) Finds a small, representative structural motif (subgraph) in the graph.
-        Actual implementation would be complex (e.g., graph mining, pattern detection).
-        """
-        # print(f"    FMO Stub ({self.__class__.__name__}): Searching for structural motif...") # Verbose
-        if len(graph.nodes) < self.min_motif_size:
-            return None
+        if len(graph.nodes) < self.min_motif_size: return None
 
-        motif_nodes_map = {} # Store node_id -> node_object for quick lookup
-        motif_edges_list = [] # Store edge objects
-
-        # Simplistic: pick a few random connected nodes and their edges via BFS/DFS
+        motif_nodes_map = {}
+        motif_edges_list = []
         all_node_ids = list(graph.nodes.keys())
         if not all_node_ids: return None
-
         start_node_id = random.choice(all_node_ids)
 
         q = [start_node_id]
-        visited_for_motif = {start_node_id} # Keep track of nodes added to this motif search
+        visited_for_motif = {start_node_id}
 
         while q and len(motif_nodes_map) < self.max_motif_size:
             curr_id = q.pop(0)
             node = graph.get_node(curr_id)
-            if node:
-                motif_nodes_map[node.id] = copy.deepcopy(node)
+            if node: motif_nodes_map[node.id] = copy.deepcopy(node)
 
-            # Add outgoing edges if target is also part of motif (or will be)
             for edge_obj in graph.get_outgoing_edges(curr_id):
                 if len(motif_nodes_map) + len(q) >= self.max_motif_size and edge_obj.target_node_id not in visited_for_motif:
-                    continue # Don't expand if we are about to exceed max_motif_size for nodes
-
+                    continue
                 if edge_obj.target_node_id not in visited_for_motif:
                     q.append(edge_obj.target_node_id)
                     visited_for_motif.add(edge_obj.target_node_id)
-
-                # If target is (or will be) in motif, add the edge
                 if edge_obj.target_node_id in visited_for_motif:
                      motif_edges_list.append(copy.deepcopy(edge_obj))
-
-            # Add incoming edges if source is already part of motif
             for edge_obj in graph.get_incoming_edges(curr_id):
                 if edge_obj.source_node_id in motif_nodes_map:
-                     # Avoid duplicates if already added via outgoing search from source
                      is_duplicate = any(e.id == edge_obj.id for e in motif_edges_list) or \
                                     any(e.source_node_id == edge_obj.source_node_id and \
                                         e.target_node_id == edge_obj.target_node_id for e in motif_edges_list)
-                     if not is_duplicate:
-                        motif_edges_list.append(copy.deepcopy(edge_obj))
+                     if not is_duplicate: motif_edges_list.append(copy.deepcopy(edge_obj))
 
         if len(motif_nodes_map) >= self.min_motif_size:
-            # print(f"    Found motif with {len(motif_nodes_map)} nodes and {len(motif_edges_list)} edges.")
             return list(motif_nodes_map.values()), motif_edges_list
-        # print("    No suitable motif found with current simplistic logic.")
         return None
 
     def _replicate_and_attach_motif(self, graph: NetworkGraph,
                                    motif_nodes: list[ArchitecturalNode],
                                    motif_edges: list[ArchitecturalEdge]):
         if not motif_nodes: return
-        # print(f"    FMO Stub ({self.__class__.__name__}): Replicating and attaching motif...")
-
         id_map = {}
-        new_nodes_added_this_replication = []
-
+        new_nodes_added = []
         for motif_node in motif_nodes:
             new_node_id = str(uuid.uuid4())
             id_map[motif_node.id] = new_node_id
-
-            new_node = ArchitecturalNode(node_id=new_node_id,
-                                         node_type=motif_node.node_type,
-                                         properties=copy.deepcopy(motif_node.properties))
-            try:
-                graph.add_node(new_node)
-                new_nodes_added_this_replication.append(new_node)
+            new_node = ArchitecturalNode(node_id=new_node_id, node_type=motif_node.node_type, properties=copy.deepcopy(motif_node.properties))
+            try: graph.add_node(new_node); new_nodes_added.append(new_node)
             except ValueError as e:
-                print(f"      Warning: Could not add node during motif replication: {e}")
-                # If node couldn't be added, we can't map its ID
-                del id_map[motif_node.id]
-
-
+                print(f"Warning: Could not add node during motif replication: {e}")
+                if motif_node.id in id_map: del id_map[motif_node.id]
         for motif_edge in motif_edges:
-            original_source_id = motif_edge.source_node_id
-            original_target_id = motif_edge.target_node_id
-
-            if original_source_id in id_map and original_target_id in id_map:
-                new_source_id = id_map[original_source_id]
-                new_target_id = id_map[original_target_id]
-
-                new_edge = ArchitecturalEdge(source_node_id=new_source_id,
-                                             target_node_id=new_target_id,
-                                             weight=motif_edge.weight,
-                                             properties=copy.deepcopy(motif_edge.properties))
-                try:
-                    graph.add_edge(new_edge)
-                except ValueError as e:
-                    # This can happen if an edge with a default UUID4 ID conflicts, though unlikely.
-                    # Or if somehow source/target nodes weren't added to graph despite being in id_map.
-                    print(f"      Warning: Could not add edge {new_source_id}->{new_target_id} during motif replication: {e}")
-
-        if new_nodes_added_this_replication:
-            existing_graph_node_ids = [nid for nid in graph.nodes.keys() if nid not in id_map.values()]
-            if existing_graph_node_ids:
-                random_new_node_to_connect = random.choice(new_nodes_added_this_replication)
-                random_existing_node_id_to_connect = random.choice(existing_graph_node_ids)
-
-                # Decide direction of connection randomly
-                if random.choice([True, False]):
-                    source, target = random_existing_node_id_to_connect, random_new_node_to_connect.id
-                else:
-                    source, target = random_new_node_to_connect.id, random_existing_node_id_to_connect
-
-                connection_edge = ArchitecturalEdge(source_node_id=source,
-                                                    target_node_id=target,
-                                                    weight=random.uniform(-0.1, 0.1))
-                try:
-                    graph.add_edge(connection_edge)
-                    # print(f"      Attached new motif by connecting {source} to {target}")
-                except ValueError as e:
-                     print(f"      Warning: Could not attach motif by connecting {source} to {target}: {e}")
-            # else:
-                # print("      Motif replicated, but no other existing nodes to attach to.")
-        # else:
-            # print("    No new nodes were successfully added in this replication.")
-
+            if motif_edge.source_node_id in id_map and motif_edge.target_node_id in id_map:
+                new_edge = ArchitecturalEdge(source_node_id=id_map[motif_edge.source_node_id],
+                                             target_node_id=id_map[motif_edge.target_node_id],
+                                             weight=motif_edge.weight, properties=copy.deepcopy(motif_edge.properties))
+                try: graph.add_edge(new_edge)
+                except ValueError as e: print(f"Warning: Could not add edge during motif replication: {e}")
+        if new_nodes_added:
+            existing_ids = [nid for nid in graph.nodes.keys() if nid not in id_map.values()]
+            if existing_ids:
+                s_node, t_node = (random.choice(existing_ids), random.choice(new_nodes_added).id) \
+                                 if random.choice([True, False]) else \
+                                 (random.choice(new_nodes_added).id, random.choice(existing_ids))
+                conn_edge = ArchitecturalEdge(source_node_id=s_node, target_node_id=t_node, weight=random.uniform(-0.1,0.1))
+                try: graph.add_edge(conn_edge)
+                except ValueError as e: print(f"Warning: Could not attach motif: {e}")
 
     def apply(self, entity: MutableEntity) -> None:
-        if not self.can_apply(entity):
-            return
-
+        if not self.can_apply(entity): return
         graph: NetworkGraph = entity.data
         print(f"FMO Stub: Applying {self.__class__.__name__} to graph {graph.id}")
-        # print(f"  Growth complexity: {self.growth_complexity}, Target scales: {self.target_scales}")
-
-        num_successful_growths = 0
-        for i in range(self.growth_complexity):
-            # print(f"  Growth iteration {i+1}/{self.growth_complexity}") # Verbose
-            motif_tuple = self._find_structural_motif(graph)
-            if motif_tuple:
-                motif_nodes, motif_edges = motif_tuple
-                if motif_nodes: # Ensure motif actually has nodes
-                    self._replicate_and_attach_motif(graph, motif_nodes, motif_edges)
-                    num_successful_growths += 1
-                else:
-                    # print("    Motif found was empty.") # Verbose
-                    break
-            else:
-                # print("    Could not find/define a motif to replicate for growth.") # Verbose
-                break
-
-        if num_successful_growths > 0:
-            print(f"  Completed {num_successful_growths} growth operations by motif replication.")
-        else:
-            print(f"  No growth operations were successfully completed.")
-
-        # print(f"FMO Stub ({self.__class__.__name__}): Placeholder growth logic executed.")
+        num_growths = 0
+        for _ in range(self.growth_complexity):
+            motif = self._find_structural_motif(graph)
+            if motif and motif[0]: self._replicate_and_attach_motif(graph, motif[0], motif[1]); num_growths+=1
+            else: break
+        print(f"  Completed {num_growths} growth operations." if num_growths > 0 else "  No growth operations completed.")
         pass
+
+# --- Smart Mutation Engine ---
+try:
+    from .reprogrammable_selector_nn import ReprogrammableSelectorNN
+    from . import feature_extractors
+except ImportError:
+    from reprogrammable_selector_nn import ReprogrammableSelectorNN
+    import feature_extractors
+    print("Warning: SmartMutationEngine (in engine.py) using fallback imports for NN and feature_extractors module.")
+# Need torch for the conceptual training feedback, ensure it's handled if not present
+try:
+    import torch
+except ImportError:
+    pass # torch is optional for the current placeholder train_step
+
+class SmartMutationEngine:
+    """
+    A mutation engine that uses a ReprogrammableSelectorNN to choose operators.
+    """
+    def __init__(self,
+                 operators: list[MutationOperator],
+                 nn_selector: ReprogrammableSelectorNN,
+                 feature_config: dict = None,
+                 fallback_to_random: bool = True,
+                 mutation_probability: float = 1.0):
+
+        if not operators:
+            raise ValueError("SmartMutationEngine requires at least one MutationOperator.")
+        if not isinstance(nn_selector, ReprogrammableSelectorNN):
+            raise ValueError("nn_selector must be an instance of ReprogrammableSelectorNN.")
+
+        self.feature_config = feature_config if feature_config is not None else feature_extractors.DEFAULT_FEATURE_CONFIG
+        if not self.feature_config or "entity_type_dispatch" not in self.feature_config or \
+           "extractor_functions_map" not in self.feature_config or "max_vector_size" not in self.feature_config:
+            raise ValueError("Invalid feature_config provided or defaulted incorrectly from feature_extractors module.")
+
+        self.operators = operators
+        self.nn_selector = nn_selector
+        self.fallback_to_random = fallback_to_random
+        if not (0.0 <= mutation_probability <= 1.0):
+            raise ValueError("Mutation probability must be between 0.0 and 1.0.")
+        self.mutation_probability = mutation_probability
+
+        nn_config_output_size = self.nn_selector.get_config().get("output_size")
+        if nn_config_output_size != len(self.operators):
+            print(f"Warning (SmartMutationEngine init): NN output size ({nn_config_output_size}) "
+                  f"does not match number of operators ({len(self.operators)}). "
+                  "This will likely cause errors during operator selection based on NN output indices.")
+
+
+    def _extract_features(self, entity: MutableEntity) -> list[float] | None:
+        entity_data_type_name = type(entity.data).__name__
+        # The key in DEFAULT_FEATURE_CONFIG for ast.Module is "Module".
+        # No re-mapping of entity_data_type_name is needed here if config is consistent.
+
+        dispatch_info = self.feature_config["entity_type_dispatch"].get(entity_data_type_name)
+        if not dispatch_info:
+            # print(f"Warning (SmartMutationEngine): No feature extractor registered for entity data type '{entity_data_type_name}'.")
+            return None
+
+        extractor_func_name = dispatch_info["extractor_function_name"]
+        extractor_func = self.feature_config["extractor_functions_map"].get(extractor_func_name)
+
+
+        if not extractor_func:
+            # print(f"Warning (SmartMutationEngine): Extractor function '{extractor_func_name}' not found in map for type '{entity_data_type_name}'.")
+            return None
+
+        try:
+            raw_features = extractor_func(entity.data)
+        except Exception as e:
+            print(f"Error during feature extraction with {extractor_func_name} for {entity_data_type_name}: {e}")
+            return None
+
+        # Ensure raw_features is a list before padding/truncating
+        if not isinstance(raw_features, list):
+            print(f"Warning (SmartMutationEngine): Extractor '{extractor_func_name}' did not return a list. Got {type(raw_features)}.")
+            return None
+
+        max_size = self.feature_config["max_vector_size"]
+        if len(raw_features) < max_size:
+            padded_features = raw_features + [0.0] * (max_size - len(raw_features))
+        else:
+            padded_features = raw_features[:max_size]
+
+        return padded_features
+
+    def select_operator_intelligently(self, entity: MutableEntity) -> MutationOperator | None:
+        features = self._extract_features(entity)
+        selected_operator = None
+
+        if features:
+            try:
+                operator_scores_tensor = self.nn_selector.predict(features)
+                operator_scores = operator_scores_tensor[0].tolist()
+
+                if len(operator_scores) != len(self.operators):
+                    print(f"Error (SmartMutationEngine): NN output size ({len(operator_scores)}) "
+                          f"FATALLY mismatches operator count ({len(self.operators)}). Cannot map scores to operators.")
+                else:
+                    op_scores_indices = []
+                    for i, op in enumerate(self.operators):
+                        op_scores_indices.append({'operator': op, 'score': operator_scores[i], 'original_index': i})
+
+                    applicable_ops_with_scores = [item for item in op_scores_indices if item['operator'].can_apply(entity)]
+
+                    if applicable_ops_with_scores:
+                        applicable_ops_with_scores.sort(key=lambda x: x['score'], reverse=True)
+                        selected_operator = applicable_ops_with_scores[0]['operator']
+
+            except Exception as e:
+                print(f"Error during NN prediction or intelligent operator selection: {e}")
+
+        if selected_operator is None and self.fallback_to_random:
+            applicable_operators = [op for op in self.operators if op.can_apply(entity)]
+            if applicable_operators:
+                selected_operator = random.choice(applicable_operators)
+
+        return selected_operator
+
+    def mutate_once(self, entity: MutableEntity) -> bool:
+        if random.random() >= self.mutation_probability:
+            return False
+
+        operator_to_apply = self.select_operator_intelligently(entity)
+
+        if operator_to_apply:
+            operator_to_apply.apply(entity)
+
+            # Conceptual: provide feedback to the NN for learning
+            # current_features = self._extract_features(entity)
+            # if current_features and hasattr(self.nn_selector, 'train_step'):
+            #    chosen_op_index = -1
+            #    try:
+            #        chosen_op_index = self.operators.index(operator_to_apply)
+            #    except ValueError:
+            #        pass
+            #    if chosen_op_index != -1 and 'torch' in globals():
+            #        reward = 0.0
+            #        # self.nn_selector.train_step(torch.tensor([current_features], dtype=torch.float32), chosen_op_index)
+            return True
+        return False
+
+    def run(self, entity: MutableEntity, num_mutations: int) -> int:
+        if num_mutations < 0: raise ValueError("Number of mutations cannot be negative.")
+
+        successful_mutations = 0
+        for _ in range(num_mutations):
+            if self.mutate_once(entity):
+                successful_mutations += 1
+        return successful_mutations
