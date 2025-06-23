@@ -456,3 +456,207 @@ if __name__ == "__main__":
     a = SimplePol("simple.asm")
     a.polymorph()
     print(a.register_lst)
+
+# --- Core IME Framework ---
+from abc import ABC, abstractmethod
+# import copy # May be useful for entities if mutations sometimes return new objects
+
+class MutableEntity:
+    """
+    Represents an entity that can be mutated by MutationOperators.
+    It acts as a wrapper around the actual data/object being mutated.
+    """
+    def __init__(self, data):
+        self._data = data # The actual content to be mutated
+        # In the future, we might add metadata, type hints, constraints, etc.
+
+    @property
+    def data(self):
+        """Provides access to the internal data.
+           Mutation operators will modify internal _data directly or via methods.
+        """
+        return self._data
+
+    @data.setter
+    def data(self, new_data):
+        """Allows direct setting of data. Useful for initialization or reset.
+           Careful consideration if this should be broadly used vs. mutation.
+        """
+        self._data = new_data
+
+    def __str__(self):
+        return f"MutableEntity(data={str(self._data)})"
+
+    # Consider adding a clone method if needed for specific mutation strategies
+    # def clone(self):
+    #     import copy
+    #     return MutableEntity(copy.deepcopy(self._data))
+
+class MutationOperator(ABC):
+    """
+    Abstract Base Class for all mutation operators.
+    A mutation operator defines a specific way to change a MutableEntity.
+    """
+
+    @abstractmethod
+    def apply(self, entity: MutableEntity) -> None:
+        """
+        Applies the mutation to the given MutableEntity.
+        This method should modify the entity's internal data.
+        """
+        pass
+
+    def can_apply(self, entity: MutableEntity) -> bool:
+        """
+        Checks if this operator can be applied to the given entity.
+        By default, operators can apply to any entity. Subclasses can override this
+        for more specific applicability checks (e.g., based on data type).
+        Returns True if applicable, False otherwise.
+        """
+        return True
+
+# --- Basic Mutation Operators ---
+
+class IntegerPerturbationOperator(MutationOperator):
+    """
+    Mutates an integer by adding a small random value to it.
+    """
+    def __init__(self, perturbation_range=(-5, 5)):
+        super().__init__()
+        if not (isinstance(perturbation_range, tuple) and
+                len(perturbation_range) == 2 and
+                isinstance(perturbation_range[0], int) and
+                isinstance(perturbation_range[1], int) and
+                perturbation_range[0] <= perturbation_range[1]):
+            raise ValueError("perturbation_range must be a tuple of two integers (min, max) with min <= max.")
+        self.min_perturb, self.max_perturb = perturbation_range
+
+    def can_apply(self, entity: MutableEntity) -> bool:
+        return isinstance(entity.data, int)
+
+    def apply(self, entity: MutableEntity) -> None:
+        if not self.can_apply(entity):
+            # Or raise an error, or log a warning
+            return
+
+        perturbation = random.randint(self.min_perturb, self.max_perturb)
+        # Ensure perturbation is not zero, to guarantee a change (optional, depends on desired behavior)
+        while perturbation == 0 and self.min_perturb != self.max_perturb : # Avoid infinite loop if range is (0,0)
+            perturbation = random.randint(self.min_perturb, self.max_perturb)
+
+        entity.data += perturbation
+
+class StringReplaceOperator(MutationOperator):
+    """
+    Mutates a string by replacing a random character with another random printable ASCII character.
+    """
+    def can_apply(self, entity: MutableEntity) -> bool:
+        return isinstance(entity.data, str) and len(entity.data) > 0
+
+    def apply(self, entity: MutableEntity) -> None:
+        if not self.can_apply(entity):
+            return
+
+        s = entity.data
+        idx = random.randrange(len(s))
+        # ASCII printable characters range from 32 (space) to 126 (~)
+        new_char_code = random.randint(32, 126)
+        original_char = s[idx]
+        new_char = chr(new_char_code)
+
+        # Ensure the new character is different from the original (optional)
+        while new_char == original_char and len(set(s)) > 1 : # Avoid infinite loop if all chars are the same
+            new_char_code = random.randint(32, 126)
+            new_char = chr(new_char_code)
+
+        entity.data = s[:idx] + new_char + s[idx+1:]
+
+class ListElementSwapOperator(MutationOperator):
+    """
+    Mutates a list by swapping two randomly selected distinct elements.
+    """
+    def can_apply(self, entity: MutableEntity) -> bool:
+        return isinstance(entity.data, list) and len(entity.data) >= 2
+
+    def apply(self, entity: MutableEntity) -> None:
+        if not self.can_apply(entity):
+            return
+
+        lst = entity.data
+        idx1, idx2 = random.sample(range(len(lst)), 2) # Ensures two distinct indices
+
+        lst[idx1], lst[idx2] = lst[idx2], lst[idx1]
+        # No need to set entity.data = lst as list is modified in-place
+
+# --- Mutation Engine ---
+
+class MutationEngine:
+    """
+    Orchestrates the mutation process on a MutableEntity using a set of MutationOperators.
+    """
+    def __init__(self, operators: list[MutationOperator], mutation_probability: float = 1.0):
+        if not operators or not all(isinstance(op, MutationOperator) for op in operators):
+            raise ValueError("MutationEngine requires a non-empty list of MutationOperator instances.")
+        if not (0.0 <= mutation_probability <= 1.0):
+            raise ValueError("Mutation probability must be between 0.0 and 1.0.")
+        self.operators = operators
+        self.mutation_probability = mutation_probability # Placeholder for adaptive rate
+
+    def evaluate_entity(self, entity: MutableEntity) -> float:
+        """
+        Evaluates the fitness or quality of a MutableEntity.
+        Placeholder: In a real scenario, this would involve a complex assessment.
+        Returns a numerical score (higher is generally better).
+        """
+        # print(f"Placeholder: Evaluating entity {entity}. Score: 0.0 (Not implemented)")
+        return 0.0 # Default score
+
+    def mutate_once(self, entity: MutableEntity) -> bool:
+        """
+        Attempts to apply a single, randomly chosen, applicable mutation operator
+        to the given entity.
+
+        Args:
+            entity: The MutableEntity to mutate.
+
+        Returns:
+            True if a mutation was successfully applied, False otherwise.
+        """
+        if random.random() >= self.mutation_probability:
+            # Optional: print("Mutation skipped due to probability.")
+            return False # Skipped due to probability
+
+        applicable_operators = [op for op in self.operators if op.can_apply(entity)]
+
+        if not applicable_operators:
+            # Optional: print(f"Warning: No applicable operators found for entity: {entity}")
+            return False
+
+        operator_to_apply = random.choice(applicable_operators)
+        # Optional: print(f"Applying {operator_to_apply.__class__.__name__} to {entity}")
+        operator_to_apply.apply(entity)
+
+        # Placeholder for where evaluation might be used after a mutation
+        # current_score = self.evaluate_entity(entity)
+        # print(f"Entity score after mutation: {current_score}")
+        return True
+
+    def run(self, entity: MutableEntity, num_mutations: int) -> int:
+        """
+        Applies a sequence of mutations to the entity.
+
+        Args:
+            entity: The MutableEntity to mutate.
+            num_mutations: The desired number of mutation steps to perform.
+
+        Returns:
+            The number of successful mutations applied.
+        """
+        if num_mutations < 0:
+            raise ValueError("Number of mutations cannot be negative.")
+
+        successful_mutations = 0
+        for _ in range(num_mutations):
+            if self.mutate_once(entity):
+                successful_mutations += 1
+        return successful_mutations
