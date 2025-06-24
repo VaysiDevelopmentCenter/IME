@@ -1,4 +1,19 @@
 # modules/reprogrammable_selector_nn.py
+import sys # For sys.path modification
+import os  # For sys.path modification
+
+# Ensure the project root is in sys.path for absolute imports when running script directly
+# This needs to be at the very top before any 'from modules.xyz' imports are attempted.
+PACKAGE_PARENT_DIR_FROM_SCRIPT = '..'
+# Get the directory of the current script
+SCRIPT_REAL_PATH = os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__)))
+SCRIPT_PARENT_DIR = os.path.dirname(SCRIPT_REAL_PATH)
+PROJECT_ROOT_PATH = os.path.normpath(os.path.join(SCRIPT_PARENT_DIR, PACKAGE_PARENT_DIR_FROM_SCRIPT))
+if PROJECT_ROOT_PATH not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT_PATH)
+# print(f"DEBUG: sys.path in reprogrammable_selector_nn.py (top): {sys.path}")
+
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -27,15 +42,29 @@ except ImportError:
         @staticmethod
         def from_data_list(data_list): raise NotImplementedError("PyGBatch stub: PyG not available.")
 
+from typing import TYPE_CHECKING # For type hinting
+
 # --- IME Component Imports & Fallbacks ---
+# NetworkGraph is now imported from graph_schema, breaking the cycle with engine.py
 try:
-    from .engine import NetworkGraph # For type hinting
-    from .gnn_utils import network_graph_to_pyg_data, NODE_FEATURE_DIM as GNN_NODE_FEATURE_DIM
-except ImportError:
-    NetworkGraph = type(None)
-    def network_graph_to_pyg_data_dummy(graph_unused): return None # type: ignore
-    network_graph_to_pyg_data = network_graph_to_pyg_data_dummy
-    GNN_NODE_FEATURE_DIM = 1
+    from modules.graph_schema import NetworkGraph
+except ImportError as e_graph_schema:
+    print(f"Warning: Could not import NetworkGraph from modules.graph_schema. Error: {e_graph_schema}")
+    NetworkGraph = type(None) # type: ignore
+
+
+try:
+    # Import the new GNN feature extractor and its dimension from feature_extractors
+    # Changed to absolute import assuming 'modules' package is in sys.path
+    from modules.feature_extractors import extract_network_graph_pyg_data, GNN_NODE_FEATURE_DIM as EXTRACTOR_GNN_NODE_FEATURE_DIM
+    # Alias for clarity if used extensively, or use directly
+    network_graph_to_pyg_data_via_extractor = extract_network_graph_pyg_data
+    IMPORTED_GNN_NODE_FEATURE_DIM = EXTRACTOR_GNN_NODE_FEATURE_DIM
+except ImportError as e_feature_extractors:
+    def network_graph_to_pyg_data_dummy(graph_unused: Any) -> None: return None # type: ignore
+    network_graph_to_pyg_data_via_extractor = network_graph_to_pyg_data_dummy # type: ignore
+    IMPORTED_GNN_NODE_FEATURE_DIM = 1 # Fallback if feature_extractors is not available or GNN_NODE_FEATURE_DIM is not set yet
+    print(f"Warning: Could not import GNN feature extractor utilities from modules.feature_extractors for ReprogrammableSelectorNN. Error: {e_feature_extractors}")
 
 
 class ReprogrammableSelectorNN(nn.Module):
@@ -48,11 +77,15 @@ class ReprogrammableSelectorNN(nn.Module):
 
         if self.model_type == "gnn" and not PYG_AVAILABLE:
             raise ImportError("PyTorch Geometric required for GNN model_type but not found.")
+
+        # For GNN, ensure node_feature_size is set, using the imported dimension if not specified in config
         if self.model_type == "gnn":
             if "node_feature_size" not in self.nn_config:
-                if GNN_NODE_FEATURE_DIM is None or (GNN_NODE_FEATURE_DIM==1 and NetworkGraph is type(None)):
-                    raise ValueError("GNN_NODE_FEATURE_DIM error / 'node_feature_size' missing in GNN config.")
-                self.nn_config["node_feature_size"] = GNN_NODE_FEATURE_DIM
+                if IMPORTED_GNN_NODE_FEATURE_DIM is None: # Check if it was successfully imported and set
+                    raise ValueError("IMPORTED_GNN_NODE_FEATURE_DIM from feature_extractors is None. Cannot configure GNN.")
+                if IMPORTED_GNN_NODE_FEATURE_DIM == 1 and NetworkGraph is type(None): # Fallback check
+                     print("Warning: Using fallback GNN_NODE_FEATURE_DIM=1. Ensure feature_extractors.GNN_NODE_FEATURE_DIM is correctly set.")
+                self.nn_config["node_feature_size"] = IMPORTED_GNN_NODE_FEATURE_DIM
 
         self.model_internal = self._build_model()
         self.optimizer = optim.Adam(self.model_internal.parameters(), lr=self.learning_rate)
@@ -95,10 +128,10 @@ class ReprogrammableSelectorNN(nn.Module):
                 for i,lc in enumerate(glc):
                     lt=lc.get("type","").lower();oc=lc.get("out_channels")
                     if oc is None: raise ValueError(f"GNN layer {i} needs 'out_channels'.")
-                    if lt=="gcnconv":s_sub.convs.append(GCNConv(cc,oc)) # Corrected self_sub
+                    if lt=="gcnconv": self_sub.convs.append(GCNConv(cc,oc)) # Fixed: s_sub to self_sub
                     else: raise ValueError(f"Unsupported GNN layer: {lt}")
                     cc=oc
-                    if(af := s_sub.p._get_activation_function(lc.get("activation"))):s_sub.convs.append(af)
+                    if(af := self_sub.p._get_activation_function(lc.get("activation"))): self_sub.convs.append(af) # Fixed: s_sub to self_sub
 
                 pool_map={"mean":global_mean_pool,"add":global_add_pool,"max":global_max_pool}
                 pool_fn = pool_map.get(gpm) # Corrected assignment
@@ -113,10 +146,19 @@ class ReprogrammableSelectorNN(nn.Module):
                         sz=lc.get("size");
                         if sz is None:raise ValueError(f"Post-GNN MLP Linear {i} needs 'size'.")
                         self_sub.post_mlp.append(nn.Linear(mcs,sz));mcs=sz
-                        if(af := s_sub.p._get_activation_function(lc.get("activation"))):s_sub.post_mlp.append(af)
-                    elif lt=="dropout":s_sub.post_mlp.append(nn.Dropout(lc.get("rate",0.5)))
+                        if(af := self_sub.p._get_activation_function(lc.get("activation"))): self_sub.post_mlp.append(af) # Fixed: s_sub to self_sub
+                    elif lt=="dropout": self_sub.post_mlp.append(nn.Dropout(lc.get("rate",0.5))) # Fixed: s_sub to self_sub
                     else:raise ValueError(f"Unsupported Post-GNN MLP layer: {lt}")
-                self_sub.out_l=nn.Linear(mcs,os);s_sub.out_act=s_sub.p._get_activation_function(oan)
+                self_sub.out_l=nn.Linear(mcs,os); self_sub.out_act=self_sub.p._get_activation_function(oan)
+
+            def __repr__(self_sub) -> str:
+                # Simplified custom repr to avoid recursion issues.
+                convs_str = f"convs_count={len(self_sub.convs)}"
+                pool_str = f"pool={self_sub.pool.__name__ if hasattr(self_sub.pool, '__name__') else str(self_sub.pool)}"
+                mlp_str = f"mlp_count={len(self_sub.post_mlp)}"
+                out_l_str = f"out_l={self_sub.out_l.__class__.__name__}"
+                out_act_str = f"out_act={self_sub.out_act.__class__.__name__ if self_sub.out_act is not None else 'None'}"
+                return f"GNNSubModel({convs_str}, {pool_str}, {mlp_str}, {out_l_str}, {out_act_str})"
 
             def forward(self_sub,d:PyGData):
                 x,ei,b=d.x,d.edge_index,getattr(d,'batch',None)
@@ -157,13 +199,21 @@ class ReprogrammableSelectorNN(nn.Module):
         with torch.no_grad():
             input_val:Union[torch.Tensor,PyGData]
             if self.model_type=="gnn":
-                if isinstance(features_or_graph_data,PyGData):input_val=features_or_graph_data
-                elif NetworkGraph is not type(None) and isinstance(features_or_graph_data,NetworkGraph):
-                    if network_graph_to_pyg_data is None:raise RuntimeError("network_graph_to_pyg_data missing.")
-                    conv_data=network_graph_to_pyg_data(features_or_graph_data)
-                    if conv_data is None:raise ValueError("NetGraph to PyGData conversion failed.")
+                if isinstance(features_or_graph_data,PyGData): # type: ignore # PyGData might be a stub
+                    input_val=features_or_graph_data
+                # NetworkGraph should be directly usable now due to import from graph_schema
+                elif NetworkGraph is not type(None) and isinstance(features_or_graph_data, NetworkGraph):
+                    # Use the newly imported conversion function
+                    if network_graph_to_pyg_data_via_extractor is None: # Should not happen if imports are correct
+                        raise RuntimeError("network_graph_to_pyg_data_via_extractor (from feature_extractors) is missing.")
+                    conv_data = network_graph_to_pyg_data_via_extractor(features_or_graph_data)
+                    if conv_data is None:
+                        # Check if PyG is actually available, as the extractor might return None if not.
+                        if not PYG_AVAILABLE:
+                            raise RuntimeError("PyTorch Geometric not available, cannot convert NetworkGraph to PyGData for GNN prediction.")
+                        raise ValueError("NetworkGraph to PyGData conversion failed using feature_extractors.extract_network_graph_pyg_data.")
                     input_val=conv_data
-                else:raise TypeError(f"GNN predict expects PyGData/NetworkGraph,got {type(features_or_graph_data)}")
+                else:raise TypeError(f"GNN predict expects PyGData or NetworkGraph, got {type(features_or_graph_data)}")
                 if verbose and isinstance(input_val, PyGData) and hasattr(input_val, 'num_nodes') and hasattr(input_val, 'num_edges'):
                     print(f"  NN Predict (GNN) Input: Nodes={input_val.num_nodes}, Edges={input_val.num_edges}, x_shape={input_val.x.shape if hasattr(input_val,'x') else 'N/A'}")
             else: # FFN
@@ -310,8 +360,11 @@ class ReprogrammableSelectorNN(nn.Module):
             if 'input_size' not in new_nn_config or 'output_size' not in new_nn_config: raise ValueError("FFN config needs input/output_size.")
         elif cm_type=="gnn":
             if 'node_feature_size' not in new_nn_config:
-                if GNN_NODE_FEATURE_DIM is None or (GNN_NODE_FEATURE_DIM==1 and NetworkGraph is type(None)): raise ValueError("GNN config needs node_feature_size or valid GNN_NODE_FEATURE_DIM.")
-                new_nn_config['node_feature_size']=GNN_NODE_FEATURE_DIM
+                # NetworkGraph should be directly usable
+                if IMPORTED_GNN_NODE_FEATURE_DIM is None or \
+                   (IMPORTED_GNN_NODE_FEATURE_DIM == 1 and NetworkGraph is type(None)):
+                   raise ValueError("GNN config needs node_feature_size or valid IMPORTED_GNN_NODE_FEATURE_DIM from feature_extractors (NetworkGraph might be None).")
+                new_nn_config['node_feature_size'] = IMPORTED_GNN_NODE_FEATURE_DIM
             if 'output_size' not in new_nn_config: raise ValueError("GNN config needs output_size.")
         else: raise ValueError(f"Unsupported model_type: {cm_type}")
         self.nn_config=copy.deepcopy(new_nn_config);self.model_type=cm_type
@@ -353,6 +406,19 @@ class ReprogrammableSelectorNN(nn.Module):
 
 # Example usage
 if __name__ == '__main__':
+    import sys
+    import os
+
+    # Explicitly add parent of 'modules' to sys.path if not already there
+    # This is to ensure 'from modules.feature_extractors' works when script is run directly.
+    PACKAGE_PARENT = '..'
+    SCRIPT_DIR = os.path.dirname(os.path.realpath(os.path.join(os.getcwd(), os.path.expanduser(__file__))))
+    NEW_PATH = os.path.normpath(os.path.join(SCRIPT_DIR, PACKAGE_PARENT))
+    if NEW_PATH not in sys.path:
+        sys.path.insert(0, NEW_PATH)
+
+    # print(f"DEBUG: sys.path in reprogrammable_selector_nn.py: {sys.path}") # For debugging path issues
+
     if not PYG_AVAILABLE: print("Warning: PyTorch Geometric not available, GNN tests will be limited or fail.")
     print("--- ReprogrammableSelectorNN (FFN & GNN path) Direct Test ---")
     Experience = namedtuple('Experience', ('state', 'action', 'reward', 'next_state', 'done'))
@@ -360,35 +426,114 @@ if __name__ == '__main__':
     print("\nTesting FFN configuration:")
     nn_ffn = ReprogrammableSelectorNN(ffn_conf, learning_rate=0.01)
     print(nn_ffn.get_architecture_summary())
-    ffn_feats1_list = [random.random() for _ in range(10)]; ffn_feats1_tens = torch.tensor(ffn_feats1_list, dtype=torch.float32)
-    ffn_feats_batch = torch.randn(4, 10)
-    print(f"FFN Predict (single list): {nn_ffn.predict(ffn_feats1_list, verbose=True)}")
+
+    # Prepare FFN dummy states as tensors [1, feature_size]
+    ffn_state1_tensor = torch.tensor([random.random() for _ in range(10)], dtype=torch.float32).unsqueeze(0)
+    ffn_next_state1_tensor = torch.randn(1, 10, dtype=torch.float32) # For the second experience
+    ffn_state2_tensor = torch.randn(1, 10, dtype=torch.float32)
+
+
+    # Test FFN predict with a list (as might come from some raw feature source)
+    ffn_predict_list_test = ffn_state1_tensor.squeeze(0).tolist()
+    print(f"FFN Predict (single list): {nn_ffn.predict(ffn_predict_list_test, verbose=True)}")
+
+    ffn_feats_batch = torch.randn(4, 10) # Batch of tensors for prediction
     print(f"FFN Predict (batch tensor): shape {nn_ffn.predict(ffn_feats_batch).shape}")
-    dummy_exp_ffn = [Experience(ffn_feats1_list,0,1.0,None,True), Experience(torch.randn(10).tolist(),1,-1.0,torch.randn(10).tolist(),False)]
+
+    # Dummy experiences for FFN should use tensors for states, as train_on_batch expects list of tensors
+    dummy_exp_ffn = [
+        Experience(ffn_state1_tensor, 0, 1.0, None, True),
+        Experience(ffn_state2_tensor, 1, -1.0, ffn_next_state1_tensor, False)
+    ]
     print("\nTesting FFN train_on_batch:")
     loss_ffn = nn_ffn.train_on_batch(dummy_exp_ffn, verbose=True); print(f"  FFN batch loss: {loss_ffn}")
 
-    if PYG_AVAILABLE and network_graph_to_pyg_data is not None and NetworkGraph is not type(None) and GNN_NODE_FEATURE_DIM > 1:
-        gnn_conf = {"model_type":"gnn","node_feature_size":GNN_NODE_FEATURE_DIM,
-                    "gnn_layers":[{"type":"gcnconv","out_channels":16,"activation":"relu"}],
-                    "global_pooling":"mean","post_gnn_mlp_layers":[{"type":"linear","size":8,"activation":"relu"}],
-                    "output_size":2,"output_activation":"none"}
-        print("\nTesting GNN configuration:")
-        nn_gnn = ReprogrammableSelectorNN(gnn_conf, learning_rate=0.01)
-        print(nn_gnn.get_architecture_summary())
-        try:
-            from modules.engine import ArchitecturalNode, ArchitecturalEdge
-            g1=NetworkGraph("g1");g1.add_node(ArchitecturalNode("n1","FunctionDef"));g1.add_node(ArchitecturalNode("n2","IfStatement"));g1.add_edge(ArchitecturalEdge("n1","n2","e1"))
-            g2=NetworkGraph("g2");g2.add_node(ArchitecturalNode("ga","ReturnStatement"));g2.add_node(ArchitecturalNode("gb","Module"));g2.add_edge(ArchitecturalEdge("ga","gb","ge1"))
-            d1=network_graph_to_pyg_data(g1); d2=network_graph_to_pyg_data(g2); d3_next=network_graph_to_pyg_data(g1)
-            if d1 and hasattr(d1,'num_nodes') and d1.num_nodes>0 and d2 and hasattr(d2,'num_nodes') and d2.num_nodes>0 and d3_next and hasattr(d3_next,'num_nodes') and d3_next.num_nodes>0:
-                print(f"GNN Predict (d1): {nn_gnn.predict(d1, verbose=True)}")
-                dummy_exp_gnn = [Experience(d1,0,0.5,d3_next,False), Experience(d2,1,-0.2,None,True)]
-                print("\nTesting GNN train_on_batch:")
-                loss_gnn = nn_gnn.train_on_batch(dummy_exp_gnn, verbose=True); print(f"  GNN batch loss: {loss_gnn}")
-            else: print("Failed to create valid PyGData for GNN test or graph was empty.")
-        except Exception as e: print(f"Error in GNN test block: {e}")
-    else: print("\nSkipping GNN test (PyG/utils/engine missing or dummy GNN_NODE_FEATURE_DIM).")
+    # For GNN test, use the new extractor and its dimension
+    # network_graph_to_pyg_data_via_extractor is already imported at the top
+
+    # --- GNN Test Debug Prints ---
+    print(f"\n--- GNN Test Pre-condition Debug ---")
+    print(f"PYG_AVAILABLE: {PYG_AVAILABLE}")
+    print(f"network_graph_to_pyg_data_via_extractor is None: {network_graph_to_pyg_data_via_extractor is None}")
+    if network_graph_to_pyg_data_via_extractor is not None:
+        print(f"type(network_graph_to_pyg_data_via_extractor): {type(network_graph_to_pyg_data_via_extractor)}")
+    # Use direct NetworkGraph for these runtime checks now
+    print(f"NetworkGraph is type(None): {NetworkGraph is type(None)}")
+    if NetworkGraph is not type(None):
+        print(f"type(NetworkGraph): {type(NetworkGraph)}")
+    print(f"IMPORTED_GNN_NODE_FEATURE_DIM: {IMPORTED_GNN_NODE_FEATURE_DIM}") # This might be None if feature_extractors hasn't run GNNFeatureExtractor yet
+    # --- End GNN Test Debug Prints ---
+
+    # Condition should use direct NetworkGraph for the check
+    if PYG_AVAILABLE and network_graph_to_pyg_data_via_extractor is not None and NetworkGraph is not type(None):
+        print("\nAttempting GNN configuration test...")
+        # First, create a sample graph and extract features to determine node_feature_size dynamically for the test
+        temp_g = NetworkGraph("temp_g_for_dim_check") # Use direct NetworkGraph to instantiate
+        temp_g.add_layer_node("l1", layer_type='Linear', node_attributes={'out_features': 10})
+        temp_pyg_data = network_graph_to_pyg_data_via_extractor(temp_g)
+
+        if temp_pyg_data is not None and hasattr(temp_pyg_data, 'x') and temp_pyg_data.x is not None and temp_pyg_data.x.ndim == 2 and temp_pyg_data.x.shape[1] > 0:
+            dynamic_node_feature_size = temp_pyg_data.x.shape[1]
+            print(f"  Dynamically determined node_feature_size for GNN test: {dynamic_node_feature_size}")
+
+            gnn_conf = {"model_type":"gnn","node_feature_size":dynamic_node_feature_size,
+                        "gnn_layers":[{"type":"gcnconv","out_channels":16,"activation":"relu"}],
+                        "global_pooling":"mean","post_gnn_mlp_layers":[{"type":"linear","size":8,"activation":"relu"}],
+                        "output_size":2,"output_activation":"none"}
+            print("  Testing GNN with dynamically determined node_feature_size:")
+            nn_gnn = ReprogrammableSelectorNN(gnn_conf, learning_rate=0.01)
+            print(nn_gnn.get_architecture_summary())
+            print("  GNN architecture summary printed.")
+
+            try:
+                print("  GNN Test: Inside try block.")
+                from modules.graph_schema import ArchitecturalNode # Explicit import for test context
+
+                # Create a graph with layer_types known to GNNFeatureExtractor
+                print("  GNN Test: Creating g1 NetworkGraph...")
+                g1 = NetworkGraph("g1_test") # Use direct NetworkGraph
+                print("  GNN Test: g1 created. Adding layers to g1...")
+                g1.add_layer_node("input_node", layer_type='Input', node_attributes={'out_features': 64})
+                g1.add_layer_node("linear1", layer_type='Linear', node_attributes={'in_features': 64, 'out_features': 32})
+                g1.add_layer_node("relu1", layer_type='ReLU', node_attributes={})
+                g1.add_layer_node("output_node", layer_type='Linear', node_attributes={'in_features': 32, 'out_features': 2})
+                g1.connect_layers("input_node", "linear1")
+                g1.connect_layers("linear1", "relu1")
+                g1.connect_layers("relu1", "output_node")
+
+                g2 = NetworkGraph("g2_test") # Use direct NetworkGraph
+                g2.add_layer_node("input_node2", layer_type='Input', node_attributes={'out_features': 64})
+                g2.add_layer_node("linear_alt", layer_type='Linear', node_attributes={'in_features': 64, 'out_features': 2})
+                g2.connect_layers("input_node2", "linear_alt")
+
+                # Convert using the new extractor function
+                d1 = network_graph_to_pyg_data_via_extractor(g1)
+                d2 = network_graph_to_pyg_data_via_extractor(g2)
+                # For next_state, can reuse or create another graph
+                g_next = NetworkGraph("g_next_test") # Use direct NetworkGraph
+                g_next.add_layer_node("next_in", layer_type='Input', node_attributes={'out_features':64})
+                g_next.add_layer_node("next_l", layer_type='Linear', node_attributes={'in_features':64,'out_features':2})
+                g_next.connect_layers("next_in","next_l")
+                d_next = network_graph_to_pyg_data_via_extractor(g_next)
+
+                if d1 and hasattr(d1,'num_nodes') and d1.num_nodes > 0 and \
+                   d2 and hasattr(d2,'num_nodes') and d2.num_nodes > 0 and \
+                   d_next and hasattr(d_next,'num_nodes') and d_next.num_nodes > 0:
+                    print(f"GNN Predict (d1): {nn_gnn.predict(d1, verbose=True)}")
+                    dummy_exp_gnn = [Experience(d1, 0, 0.5, d_next, False), Experience(d2, 1, -0.2, None, True)]
+                    print("\nTesting GNN train_on_batch:")
+                    loss_gnn = nn_gnn.train_on_batch(dummy_exp_gnn, verbose=True)
+                    print(f"  GNN batch loss: {loss_gnn}")
+                else:
+                    print("Failed to create valid PyGData for GNN test or graph was empty.")
+                    if d1: print(f"  d1 check: x={d1.x.shape if hasattr(d1,'x') and d1.x is not None else 'N/A'}, edge_index={d1.edge_index.shape if hasattr(d1,'edge_index') and d1.edge_index is not None else 'N/A'}")
+                    if d2: print(f"  d2 check: x={d2.x.shape if hasattr(d2,'x') and d2.x is not None else 'N/A'}, edge_index={d2.edge_index.shape if hasattr(d2,'edge_index') and d2.edge_index is not None else 'N/A'}")
+                    if d_next: print(f"  d_next check: x={d_next.x.shape if hasattr(d_next,'x') and d_next.x is not None else 'N/A'}, edge_index={d_next.edge_index.shape if hasattr(d_next,'edge_index') and d_next.edge_index is not None else 'N/A'}")
+
+            except Exception as e:
+                print(f"Error in GNN test block: {e}")
+    else:
+        print("\nSkipping GNN test (PyG not available, or network_graph_to_pyg_data_via_extractor missing, or NetworkGraph type is None).")
 
     print("\nTesting Save/Load:")
     save_dir = "./temp_nn_save"
@@ -399,7 +544,8 @@ if __name__ == '__main__':
         print(loaded_nn.get_architecture_summary())
         print(f"Loaded NN learning rate (should be 0.005): {loaded_nn.learning_rate}")
         assert loaded_nn.learning_rate == 0.005
-        print(f"Prediction from loaded model: {loaded_nn.predict(ffn_feats1_list)}")
+        # Use ffn_predict_list_test which was defined earlier for prediction consistency
+        print(f"Prediction from loaded model: {loaded_nn.predict(ffn_predict_list_test)}")
     except Exception as e:
         print(f"Error during save/load test: {e}")
     finally:

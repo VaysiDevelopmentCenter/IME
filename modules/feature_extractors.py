@@ -1,13 +1,143 @@
 # modules/feature_extractors.py
 import ast
 import statistics
-from typing import List, Any, Dict, Callable # For type hints
+from typing import List, Any, Dict, Callable, Optional # For type hints
 
 # Forward declaration for NetworkGraph if it's used by an extractor and defined in engine
-# For this phase, we are deferring NetworkGraph features, so this is less critical now.
-# class NetworkGraph: pass
+from typing import TYPE_CHECKING, Union # Added Union for PyGData type hint
+if TYPE_CHECKING:
+    from modules.graph_schema import NetworkGraph # Changed import source
+    from torch_geometric.data import Data as PyGData # For type hinting
+
+try:
+    import torch
+    from torch_geometric.data import Data as PyGData_import
+    PYG_AVAILABLE = True
+except ImportError:
+    torch = None # type: ignore
+    PyGData_import = None # type: ignore
+    PYG_AVAILABLE = False
+    if TYPE_CHECKING: # Make type checker happy with a stub
+        class PyGData: # type: ignore
+            def __init__(self, x=None, edge_index=None, **kwargs): self.x=x; self.edge_index=edge_index; [setattr(self,k,v) for k,v in kwargs.items()]
+    else: # Runtime stub
+        PyGData = type(None)
+
 
 # --- Feature Extractors ---
+# List of known layer types for one-hot encoding in GNNFeatureExtractor
+# The last type 'Other' will serve as a fallback.
+KNOWN_LAYER_TYPES: List[str] = [
+    'Input', 'Output', # Special conceptual layers
+    'Linear', 'Conv1d', 'Conv2d', 'Conv3d',
+    'ReLU', 'Sigmoid', 'Tanh', 'Softmax', 'LeakyReLU', 'ELU', 'SELU',
+    'Attention', 'MultiheadAttention',
+    'BatchNorm1d', 'BatchNorm2d', 'BatchNorm3d', 'LayerNorm', 'InstanceNorm1d', 'InstanceNorm2d', 'InstanceNorm3d',
+    'Dropout',
+    'MaxPool1d', 'MaxPool2d', 'MaxPool3d', 'AvgPool1d', 'AvgPool2d', 'AvgPool3d', 'AdaptiveAvgPool2d',
+    'Embedding', 'LSTM', 'GRU',
+    'Flatten', 'Unflatten',
+    'Other'
+]
+
+# Global variable to store the calculated GNN node feature dimension.
+# This will be set by GNNFeatureExtractor after its first feature calculation.
+# A more dynamic approach might be needed if features change, but this is for initialization.
+GNN_NODE_FEATURE_DIM: Optional[int] = None
+
+
+class GNNFeatureExtractor:
+    def __init__(self, known_layer_types: Optional[List[str]] = None,
+                 max_out_features_scale: float = 1024.0, # For normalization
+                 default_numerical_features: int = 3 # out_features, in_features, num_heads (example)
+                 ):
+        self.known_layer_types = known_layer_types if known_layer_types is not None else KNOWN_LAYER_TYPES
+        self.layer_type_to_idx = {name: i for i, name in enumerate(self.known_layer_types)}
+        self.num_layer_types = len(self.known_layer_types)
+        self.max_out_features_scale = max_out_features_scale
+
+        # Calculate feature dimension: one-hot for layer_type + numerical features
+        # Example numerical features: normalized out_features, normalized in_features, normalized num_heads
+        self.node_feature_dim = self.num_layer_types + default_numerical_features
+
+        global GNN_NODE_FEATURE_DIM
+        if GNN_NODE_FEATURE_DIM is None:
+            GNN_NODE_FEATURE_DIM = self.node_feature_dim
+        elif GNN_NODE_FEATURE_DIM != self.node_feature_dim:
+            print(f"Warning: GNN_NODE_FEATURE_DIM changing from {GNN_NODE_FEATURE_DIM} to {self.node_feature_dim}")
+            GNN_NODE_FEATURE_DIM = self.node_feature_dim
+
+
+    def extract_pyg_data(self, network_graph: 'NetworkGraph') -> 'Optional[PyGData]':
+        if not PYG_AVAILABLE or torch is None or PyGData_import is None:
+            print("Warning: PyTorch Geometric or PyTorch not available. Cannot extract PyGData.")
+            return None
+
+        node_to_idx = {node_id: i for i, node_id in enumerate(network_graph.nodes.keys())}
+        num_nodes = len(network_graph.nodes)
+
+        if num_nodes == 0: # Handle empty graph
+             return PyGData_import(x=torch.empty(0, self.node_feature_dim, dtype=torch.float32),
+                                   edge_index=torch.empty(2,0, dtype=torch.long))
+
+
+        node_features_list = []
+
+        for node_id, node in network_graph.nodes.items():
+            # 1. One-hot encode layer_type
+            one_hot_layer_type = [0.0] * self.num_layer_types
+            layer_type_idx = self.layer_type_to_idx.get(node.properties.get('layer_type', 'Other'),
+                                                        self.layer_type_to_idx['Other'])
+            one_hot_layer_type[layer_type_idx] = 1.0
+
+            # 2. Numerical features (example: out_features, in_features, num_heads)
+            # Normalize or scale these. Handle if None.
+            out_features = node.properties.get('out_features')
+            norm_out_features = float(out_features / self.max_out_features_scale) if isinstance(out_features, int) else 0.0
+
+            in_features = node.properties.get('in_features')
+            norm_in_features = float(in_features / self.max_out_features_scale) if isinstance(in_features, int) else 0.0
+
+            num_heads = node.properties.get('num_heads') # Common in Attention layers
+            norm_num_heads = float(num_heads / 64.0) if isinstance(num_heads, int) else 0.0 # Assuming max 64 heads for scaling
+
+            # Concatenate features
+            # Current order: [one_hot_layer_types, norm_out_features, norm_in_features, norm_num_heads]
+            # Ensure this order matches the self.node_feature_dim calculation.
+            current_node_features = one_hot_layer_type + [norm_out_features, norm_in_features, norm_num_heads]
+            node_features_list.append(current_node_features)
+
+        node_features_tensor = torch.tensor(node_features_list, dtype=torch.float32)
+
+        # Create edge_index
+        source_nodes: List[int] = []
+        target_nodes: List[int] = []
+        for edge in network_graph.edges.values():
+            if edge.source_node_id in node_to_idx and edge.target_node_id in node_to_idx:
+                source_nodes.append(node_to_idx[edge.source_node_id])
+                target_nodes.append(node_to_idx[edge.target_node_id])
+
+        edge_index_tensor = torch.tensor([source_nodes, target_nodes], dtype=torch.long)
+
+        return PyGData_import(x=node_features_tensor, edge_index=edge_index_tensor)
+
+
+# Helper function to be mapped in DEFAULT_FEATURE_CONFIG
+# This allows SmartMutationEngine to call it without needing to instantiate GNNFeatureExtractor itself
+# or if we want a singleton GNNFeatureExtractor.
+_gnn_feature_extractor_instance: Optional[GNNFeatureExtractor] = None
+
+def extract_network_graph_pyg_data(network_graph: 'NetworkGraph') -> 'Optional[PyGData]':
+    global _gnn_feature_extractor_instance
+    if _gnn_feature_extractor_instance is None:
+        _gnn_feature_extractor_instance = GNNFeatureExtractor() # Use default KNOWN_LAYER_TYPES
+
+    # In SmartMutationEngine, the feature is expected as List[float] for FFN,
+    # and PyGData for GNN. The _get_rl_state_representation handles this.
+    # For now, this function will return PyGData directly.
+    # The part of SmartMutationEngine that uses this for GNN will expect PyGData.
+    # If this were to be used for an FFN representation of a graph, we'd need to flatten PyGData.
+    return _gnn_feature_extractor_instance.extract_pyg_data(network_graph)
 
 def extract_list_features(data: List[Any], max_len_for_padding: int = 10) -> List[float]:
     """
@@ -135,22 +265,31 @@ DEFAULT_FEATURE_CONFIG: Dict[str, Any] = {
             "extractor_function_name": "extract_ast_module_features",
             "feature_names": ["num_FunctionDef", "num_Assign", "num_Constant", "num_Name_Load", "num_Name_Store", "max_depth", "num_If", "num_For"],
             "expected_feature_length": 8
+        },
+        "NetworkGraph": {
+            # This function returns PyGData, not a flat list.
+            # SmartMutationEngine's _get_rl_state_representation will handle this.
+            "extractor_function_name": "extract_network_graph_pyg_data",
+            # feature_names and expected_feature_length are less relevant here
+            # as the output is graph structured. For FFN use, one might flatten this.
+            "feature_names": ["pyg_data_object"],
+            "expected_feature_length": 1 # Placeholder, actual features are in PyGData.x
         }
-        # Deferred for this restart:
-        # "NetworkGraph": {
-        #     "extractor_function_name": "extract_network_graph_features",
-        #     "feature_names": ["num_nodes", "num_edges", "avg_degree", "num_instr_nodes", ...],
-        #     "expected_feature_length": 8 # Or whatever it becomes
-        # }
     },
     "extractor_functions_map": {
         "extract_list_features": extract_list_features,
         "extract_ast_module_features": extract_ast_module_features,
-        # "extract_network_graph_features": extract_network_graph_features, # Deferred
+        "extract_network_graph_pyg_data": extract_network_graph_pyg_data,
     }
 }
 
 if __name__ == '__main__':
+    import sys
+    import os
+    # Add repository root to sys.path to allow direct execution of this script
+    # and importing other modules from the 'modules' package.
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
     print("--- Feature Extractors Direct Test ---")
 
     # Test list features
@@ -182,5 +321,71 @@ foo(x, 20)
 
     empty_ast = ast.parse("")
     print(f"Empty AST -> Features: {extract_ast_module_features(empty_ast)}")
+
+    # Test GNNFeatureExtractor
+    print("\n--- Testing GNNFeatureExtractor ---")
+    if PYG_AVAILABLE:
+        try:
+            from modules.engine import NetworkGraph # Import for test
+
+            # Create a sample NetworkGraph
+            graph = NetworkGraph(graph_id="test_graph_for_extractor")
+            graph.add_layer_node("input1", layer_type="Input", node_attributes={'out_features': 64})
+            graph.add_layer_node("linear1", layer_type="Linear", node_attributes={'in_features': 64, 'out_features': 32, 'activation_function': 'ReLU'})
+            graph.add_layer_node("output1", layer_type="Output", node_attributes={'in_features': 32, 'out_features': 10})
+            graph.connect_layers("input1", "linear1")
+            graph.connect_layers("linear1", "output1")
+
+            print(f"Created NetworkGraph: {graph}")
+            for node_id, node_obj in graph.nodes.items():
+                print(f"  {node_obj}")
+            for edge_id, edge_obj in graph.edges.items():
+                print(f"  {edge_obj}")
+
+            # 1. Test direct instantiation and use
+            print("\n1. Testing GNNFeatureExtractor instance:")
+            extractor_instance = GNNFeatureExtractor()
+            pyg_data_instance = extractor_instance.extract_pyg_data(graph)
+            if pyg_data_instance:
+                print(f"  Extracted PyGData (instance): {pyg_data_instance}")
+                print(f"    Node features (x) shape: {pyg_data_instance.x.shape}")
+                print(f"    Edge index (edge_index) shape: {pyg_data_instance.edge_index.shape}")
+                print(f"    GNN_NODE_FEATURE_DIM set to: {GNN_NODE_FEATURE_DIM}")
+                assert GNN_NODE_FEATURE_DIM == pyg_data_instance.x.shape[1]
+            else:
+                print("  Failed to extract PyGData using instance.")
+
+            # 2. Test helper function (uses singleton)
+            print("\n2. Testing extract_network_graph_pyg_data helper:")
+            pyg_data_helper = extract_network_graph_pyg_data(graph)
+            if pyg_data_helper:
+                print(f"  Extracted PyGData (helper): {pyg_data_helper}")
+                print(f"    Node features (x) shape: {pyg_data_helper.x.shape}")
+                print(f"    Edge index (edge_index) shape: {pyg_data_helper.edge_index.shape}")
+                assert GNN_NODE_FEATURE_DIM == pyg_data_helper.x.shape[1] # Should be same dim
+            else:
+                print("  Failed to extract PyGData using helper.")
+
+            # Test with an empty graph
+            print("\n3. Testing with empty graph:")
+            empty_graph = NetworkGraph(graph_id="empty_graph")
+            pyg_empty_data = extract_network_graph_pyg_data(empty_graph)
+            if pyg_empty_data:
+                print(f"  Extracted PyGData (empty): {pyg_empty_data}")
+                print(f"    Node features (x) shape: {pyg_empty_data.x.shape}")
+                print(f"    Edge index (edge_index) shape: {pyg_empty_data.edge_index.shape}")
+                assert pyg_empty_data.x.shape[0] == 0
+                assert pyg_empty_data.x.shape[1] == GNN_NODE_FEATURE_DIM if GNN_NODE_FEATURE_DIM is not None else True # Dimension should match
+                assert pyg_empty_data.edge_index.shape[1] == 0
+            else:
+                print("  Failed to extract PyGData for empty graph (or PyG not available).")
+
+        except ImportError as e:
+            print(f"Could not import NetworkGraph for GNN test: {e}")
+        except Exception as e:
+            print(f"An error occurred during GNNFeatureExtractor test: {e}")
+    else:
+        print("PyTorch Geometric not available, skipping GNNFeatureExtractor tests.")
+
 
     print("\n--- Feature Extractors Test Complete ---")

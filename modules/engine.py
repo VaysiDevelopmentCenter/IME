@@ -3,7 +3,7 @@ import random
 from abc import ABC, abstractmethod
 import copy
 import uuid
-from typing import Any, List, Optional, Dict, Type
+from typing import Any, List, Optional, Dict, Type, Union # Added Union
 
 try:
     import torch
@@ -11,23 +11,38 @@ except ImportError:
     pass
 
 # --- Imports for SmartMutationEngine ---
+# Changed to absolute imports
 try:
-    from .reprogrammable_selector_nn import ReprogrammableSelectorNN, PYG_AVAILABLE, PyGData
-except ImportError:
+    from modules.reprogrammable_selector_nn import ReprogrammableSelectorNN
+    # PYG_AVAILABLE will be sourced from reprogrammable_selector_nn if needed, or feature_extractors
+except ImportError as e_rsel:
+    print(f"Engine.py: Failed to import ReprogrammableSelectorNN: {e_rsel}")
     ReprogrammableSelectorNN = type(None)
-    PYG_AVAILABLE = False
-    class PyGData: pass
+
+# Independent PyGData import for engine.py's own potential needs (if any beyond type hints from other modules)
+# and for SmartMutationEngine's _get_rl_state_representation type checks.
+try:
+    from torch_geometric.data import Data as PyGData
+    PYG_AVAILABLE_IN_ENGINE = True # Local flag for engine's direct PyG capabilities
+except ImportError:
+    class PyGData: # type: ignore
+        def __init__(self, x=None, edge_index=None, **kwargs): pass # Basic stub
+    PYG_AVAILABLE_IN_ENGINE = False
 
 try:
-    from . import feature_extractors
+    from modules import feature_extractors
+    # Access PYG_AVAILABLE from feature_extractors if needed, as it also handles PyG imports
+    # For SmartMutationEngine, PYG_AVAILABLE from feature_extractors is more relevant for data conversion.
     DEFAULT_FEATURE_CONFIG_FROM_MODULE = feature_extractors.DEFAULT_FEATURE_CONFIG
-except ImportError:
+except ImportError as e_fe:
+    print(f"Engine.py: Failed to import feature_extractors: {e_fe}")
     feature_extractors = None
     DEFAULT_FEATURE_CONFIG_FROM_MODULE = {}
 
 try:
-    from .rl_utils import ExperienceReplayBuffer
-except ImportError:
+    from modules.rl_utils import ExperienceReplayBuffer
+except ImportError as e_rl:
+    print(f"Engine.py: Failed to import ExperienceReplayBuffer: {e_rl}")
     ExperienceReplayBuffer = type(None)
 
 
@@ -240,57 +255,14 @@ class MutationEngine: # Basic engine
             if self.mutate_once(entity):succ+=1
         return succ
 
-# --- Architectural Graph Representation ---
-class ArchitecturalNode:
-    def __init__(self, node_id:Optional[str]=None, node_type:str="generic", properties:Optional[Dict[str,Any]]=None):
-        self.id=node_id if node_id is not None else str(uuid.uuid4()); self.node_type=node_type
-        self.properties=properties if properties is not None else {}
-    def __str__(self): return f"Node(id={self.id}, type={self.node_type}, props={self.properties})"
-class ArchitecturalEdge:
-    def __init__(self, source_node_id:str, target_node_id:str, edge_id:Optional[str]=None, weight:float=0.0, properties:Optional[Dict[str,Any]]=None): # Renamed args
-        self.id=edge_id if edge_id is not None else str(uuid.uuid4())
-        if not source_node_id or not target_node_id: raise ValueError("Src/tgt node IDs needed.")
-        self.source_node_id=source_node_id; self.target_node_id=target_node_id; self.weight=weight # Renamed args
-        self.properties=properties if properties is not None else {}
-    def __str__(self): return f"Edge(id={self.id}, from={self.source_node_id}, to={self.target_node_id}, w={self.weight}, props={self.properties})"
-class PartitionSchema:
-    def __init__(self, name:str, target_element_type:str, partitions:List[set[str]], schema_id:Optional[str]=None, metadata:Optional[Dict[str,Any]]=None): # Renamed args
-        self.id=schema_id if schema_id is not None else str(uuid.uuid4()); self.name=name # Renamed args
-        self.target_element_type=target_element_type; self.partitions=partitions
-        self.metadata=metadata if metadata is not None else {}
-    def __str__(self): return f"PSchema(id={self.id},'{self.name}',type='{self.target_element_type}',parts={len(self.partitions)})" # Shorter str
-class NetworkGraph:
-    def __init__(self, graph_id:Optional[str]=None, properties:Optional[Dict[str,Any]]=None):
-        self.id=graph_id if graph_id is not None else str(uuid.uuid4()); self.nodes:Dict[str,ArchitecturalNode]={}
-        self.edges:Dict[str,ArchitecturalEdge]={}; self.adj:Dict[str,Dict[str,List[str]]]={}
-        self.properties=properties if properties is not None else {}; self.partition_schemas:List[PartitionSchema]=[]
-    def add_node(self,n:ArchitecturalNode):
-        if n.id in self.nodes:raise ValueError(f"Node ID {n.id} exists.");self.nodes[n.id]=n;self.adj[n.id]={'in':[],'out':[]}
-    def remove_node(self,nid:str):
-        if nid not in self.nodes:return
-        for eid in list(self.edges.keys()):
-            e=self.edges[eid]
-            if e.source_node_id==nid or e.target_node_id==nid: self.remove_edge(eid)
-        if nid in self.nodes:del self.nodes[nid]
-        if nid in self.adj:del self.adj[nid]
-    def add_edge(self,e:ArchitecturalEdge):
-        if e.id in self.edges:raise ValueError(f"Edge ID {e.id} exists.")
-        if e.source_node_id not in self.nodes:raise ValueError(f"Src node {e.source_node_id} missing.")
-        if e.target_node_id not in self.nodes:raise ValueError(f"Tgt node {e.target_node_id} missing.")
-        self.edges[e.id]=e; self.adj[e.source_node_id]['out'].append(e.id); self.adj[e.target_node_id]['in'].append(e.id)
-    def remove_edge(self,eid:str):
-        if eid not in self.edges:return; e=self.edges[eid]
-        if e.source_node_id in self.adj and eid in self.adj[e.source_node_id]['out']: self.adj[e.source_node_id]['out'].remove(eid)
-        if e.target_node_id in self.adj and eid in self.adj[e.target_node_id]['in']: self.adj[e.target_node_id]['in'].remove(eid)
-        if eid in self.edges:del self.edges[eid]
-    def get_node(self,nid:str)->Optional[ArchitecturalNode]:return self.nodes.get(nid)
-    def get_edge(self,eid:str)->Optional[ArchitecturalEdge]:return self.edges.get(eid)
-    def get_incoming_edges(self,nid:str)->List[ArchitecturalEdge]: return [self.edges[eid] for eid in self.adj.get(nid,{}).get('in',[]) if eid in self.edges]
-    def get_outgoing_edges(self,nid:str)->List[ArchitecturalEdge]: return [self.edges[eid] for eid in self.adj.get(nid,{}).get('out',[]) if eid in self.edges]
-    def add_partition_schema(self,s:PartitionSchema):self.partition_schemas.append(s)
-    def __str__(self): return f"NetGraph(id={self.id},n={len(self.nodes)},e={len(self.edges)},p={len(self.partition_schemas)})"
+# Import graph schema classes from the new module
+from modules.graph_schema import ArchitecturalNode, ArchitecturalEdge, PartitionSchema, NetworkGraph
+# Ensure ast is imported if SmartMutationEngine._extract_features uses it for type checking
+import ast
+
 
 # --- SRO & FMO Stubs (Further Simplified) ---
+# These operators might use NetworkGraph, so they are defined after its import.
 class RepartitionGraphOperator(MutationOperator):
     def __init__(self, **kwargs): super().__init__()
     def can_apply(self, entity:MutableEntity)->bool:return isinstance(entity.data,NetworkGraph) and len(entity.data.nodes)>0
@@ -335,22 +307,62 @@ class SmartMutationEngine:
         self.rl_batch_size=rl_batch_size; self.train_frequency=train_frequency
         self.mutation_steps_count=0; self.current_episode_step_count=0; self.max_steps_per_episode=max_steps_per_episode
 
-    def _get_rl_state_representation(self, entity:MutableEntity)->Optional[Any]:
-        features_list=self._extract_features(entity)
-        if features_list is None: return None
-        if ReprogrammableSelectorNN is not type(None) and hasattr(self.nn_selector, 'model_type') and self.nn_selector.model_type=="gnn":
-            if NetworkGraph is not type(None) and isinstance(entity.data,NetworkGraph) and \
-               feature_extractors is not None and hasattr(feature_extractors,'network_graph_to_pyg_data'):
-                if not PYG_AVAILABLE or PyGData is type(None) or PyGData.__name__=='PyGData':
-                    return torch.tensor([features_list],dtype=torch.float32) if 'torch' in globals() and torch is not None else features_list
-                pyg_d = feature_extractors.network_graph_to_pyg_data(entity.data)
-                return pyg_d if pyg_d is not None else (torch.tensor([features_list],dtype=torch.float32) if 'torch' in globals() and torch is not None else features_list)
-            else: return torch.tensor([features_list],dtype=torch.float32) if 'torch' in globals() and torch is not None else features_list
-        else: return torch.tensor([features_list],dtype=torch.float32) if 'torch' in globals() and torch is not None else features_list
+    def _get_rl_state_representation(self, entity: MutableEntity) -> Optional[Any]:
+        # _extract_features is now expected to return:
+        # - PyGData object if entity is NetworkGraph and GNN features are extracted.
+        # - List[float] if entity is for FFN features.
+        # - None on failure.
+        extracted_output = self._extract_features(entity)
 
-    def _extract_features(self, entity:MutableEntity)->Optional[List[float]]:
+        if extracted_output is None:
+            return None
+
+        is_gnn_selector = (ReprogrammableSelectorNN is not type(None) and
+                           hasattr(self.nn_selector, 'model_type') and
+                           self.nn_selector.model_type == "gnn")
+
+        # Determine PyGData type robustly (it might be a stub if torch_geometric is not installed)
+        pyg_data_type_actual = None
+        if feature_extractors is not None and hasattr(feature_extractors, 'PyGData_import') and feature_extractors.PyGData_import is not None:
+            pyg_data_type_actual = feature_extractors.PyGData_import
+        elif PYG_AVAILABLE_IN_ENGINE : # Fallback to engine's PyGData if feature_extractors didn't provide it
+             pyg_data_type_actual = PyGData
+
+        is_extracted_pyg = pyg_data_type_actual is not None and isinstance(extracted_output, pyg_data_type_actual)
+
+        if is_gnn_selector:
+            if is_extracted_pyg:
+                return extracted_output  # Expected: PyGData for GNN
+            else:
+                print(f"Warning: GNN selector received non-PyGData features (type: {type(extracted_output)}). Ensure NetworkGraph entities use a GNN-compatible feature extractor.")
+                return None
+        else:  # FFN selector
+            if isinstance(extracted_output, list):
+                if torch is not None:
+                    return torch.tensor([extracted_output], dtype=torch.float32) # Expected: List[float] for FFN
+                return extracted_output # No torch, return list
+            elif is_extracted_pyg:
+                 print(f"Warning: FFN selector received PyGData features: {type(extracted_output)}. This is not directly usable by an FFN. Ensure non-NetworkGraph entities use an FFN-compatible feature extractor.")
+                 return None
+            else:
+                print(f"Warning: FFN selector received unexpected feature type: {type(extracted_output)}")
+                return None
+
+    def _extract_features(self, entity:MutableEntity)->Optional[Union[List[float], PyGData]]:
+        # Type hint for PyGData here refers to the one defined/imported in this file (engine.py)
         et_name=type(entity.data).__name__
-        if et_name == 'Module': et_name = "Module"
+
+        # Determine entity type string for dispatch
+        # Check for ast.Module first, as its __name__ is 'Module'
+        # We need a way to distinguish ast.Module from a user-defined 'Module' class potentially
+        # For now, assume 'Module' in config refers to ast.Module if data is an AST node.
+        # A more robust way would be to register types rather than rely on __name__.
+        if 'ast' in globals() and isinstance(entity.data, ast.AST): # Check if ast was imported
+             if isinstance(entity.data, ast.Module): et_name = "Module_AST" # Or just "Module" if config uses that
+        elif NetworkGraph is not type(None) and isinstance(entity.data, NetworkGraph):
+            et_name = "NetworkGraph"
+        # else et_name is already type(entity.data).__name__ for list, int, str etc.
+
         disp_info=self.feature_config["entity_type_dispatch"].get(et_name)
         if not disp_info: return None
         ext_fn_name=disp_info["extractor_function_name"]
