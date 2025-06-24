@@ -1,1298 +1,437 @@
 import re
 import random
-
-
-class SimplePol:
-    """
-    Class to make from one asm file another one but polymorphic to the input file.
-    """
-
-    def __init__(self, path):
-        """
-        Initialisation of path to file and lists for parsing.
-        :param path: string.
-        """
-        self.stack_register = None
-        self.add_sub_register = None
-        self.border_pos = None
-        self.all_registers_lst = ['rdx', 'rax', 'rcx', 'rsi', 'r11', 'rdi', 'rbx', 'r8', 'r10', 'r9', 'r12', 'r13',
-                                  'r14', 'r15', 'rbp', 'rsp']
-        self.path = path
-        self.content = list()
-        self.mov_xor_jmp_je_jk_lst = list()
-        self.add_sub_lst = list()
-        self.add_sub_lst_im = list()
-        self.add_sub_lst_reg = list()
-        self.register_lst = list()
-        self.mul_lst = list()
-        self.cmp_lst = list()
-
-    def reader(self):
-        """
-        Read asm file and parse it by \n.
-        :return: None.
-        """
-        with open(self.path) as f:
-            for line in f:
-                self.content.append(line.strip().split('\n'))
-
-    def parser(self, word, lst):
-        """
-        Find some command in the asm file.
-        :param word: string
-        :param lst: list of strings
-        :return: None.
-        """
-        for i in range(len(self.content)):
-            if re.match(word, self.content[i][0]):
-                lst.append(self.content[i])
-
-    def parser_register(self):
-        """
-        Find all registers that used in asm file.
-        :return: None
-        """
-        for i in range(len(self.content)):
-            length = len(self.content[i][0])
-            register = str()
-            while length != 0:
-                if self.content[i][0][length - 1] == ',':
-                    while self.content[i][0][length - 1] != ' ' and self.content[i][0][length - 1] != '\t':
-                        length -= 1
-                        if self.content[i][0][length - 1].isalnum():
-                            register += self.content[i][0][length - 1]
-                        else:
-                            break
-                    break
-                length -= 1
-            if register:
-                register = register[::-1]
-                self.register_lst.append(register)
-        self.register_lst = list(set(self.register_lst))
-        trash = list()
-        for i in range(len(self.register_lst)):
-            if len(self.register_lst[i]) > 3 or len(self.register_lst[i]) < 2:
-                trash.append(self.register_lst[i])
-        for i in range(len(trash)):
-            self.register_lst.remove(trash[i])
-
-    def parser_commands(self):
-        """
-        Find all mov, cmp, jmp,je,jk commands in asm file.
-        :return: None
-        """
-        self.parser(r"mov|jmp|je|jk|xor", self.mov_xor_jmp_je_jk_lst)
-
-    def parser_add_sub(self):
-        """
-        Find all add and sub commands in asm file.
-        :return: None
-        """
-        self.parser(r"add|sub", self.add_sub_lst)
-
-    def parser_cmp(self):
-        """
-        Find all cmp commands in asm file.
-        :return: None
-        """
-        self.parser(r"cmp", self.cmp_lst)
-
-    def parser_mul(self):
-        """
-        Find in asm file all mul commands amd related nov commands.
-        :return: None
-        """
-        self.parser(r"mul", self.mul_lst)
-        for i in range(len(self.mul_lst)):
-            index = self.content.index(self.mul_lst[i])
-            self.mul_lst.insert(i, self.content[index - 1])
-            self.mul_lst.insert(i, self.content[index - 2])
-
-    def set_border(self):
-        """
-        Function to detect the first command in asm code
-        :return: None
-        """
-        for i in range(len(self.content)):
-            if self.content[i] in self.mov_xor_jmp_je_jk_lst or self.content[i] in self.cmp_lst or \
-                    self.content[i] in self.mul_lst or self.content[i] in self.add_sub_lst:
-                self.border_pos = self.content[i]
-                break
-
-    def classification_add_sub(self):
-        """
-        Function to divide to different lists add and sub command. Add and sub with
-        immediate and add with register.
-        :return: None
-        """
-        for i in range(len(self.add_sub_lst)):
-            if re.search(r', ?[0-9]+', self.add_sub_lst[i][0]):
-                self.add_sub_lst_im.append(self.add_sub_lst[i])
-            else:
-                self.add_sub_lst_reg.append(self.add_sub_lst[i])
-
-    @staticmethod
-    def number_division(number):
-        """
-        Return a random number where param number is sup.
-        :param number: int
-        :return: None
-        """
-        return random.randrange(number)
-
-    @staticmethod
-    def line_maker(line, number, reverse=False):
-        """
-        Function to generate new line of asm code with add or sub and new
-        numeric value.
-        :param line: string
-        :param number: int
-        :param reverse: bool
-        :return: string
-        """
-        new_line = str()
-        i = 0
-        while line[i] != ',':
-            new_line += line[i]
-            i += 1
-        new_line += ','
-        new_line += str(number)
-        if reverse and new_line[0] == 'a':
-            new_line = list(new_line)
-            new_line[0], new_line[1], new_line[2] = 's', 'u', 'b'
-            new_line = ''.join(new_line)
-        elif reverse and new_line[0] == 's':
-            new_line = list(new_line)
-            new_line[0], new_line[1], new_line[2] = 'a', 'd', 'd'
-            new_line = ''.join(new_line)
-        return new_line
-
-    def nope_adder(self, element):
-        """
-        Add to asm code nop.
-        :param element: list of elements
-        :return: None
-        """
-        index = self.content.index(element)
-        self.content.insert(index, ['nop'])
-
-    def division_adder_im(self, element):
-        """
-        Extract a number from a line and choose how to divide it.
-        :param element: list
-        :return: None
-        """
-        length = len(element[0])
-        number = str()
-        exact_number = str()
-        while element[0][length - 1] != ',':
-            number += element[0][length - 1]
-            length -= 1
-        number = number.split()
-        for i in range(len(number)):
-            if number[i].isdecimal():
-                exact_number = number[i]
-                break
-        number = int(exact_number[::-1])
-        div = self.number_division(number)
-        choice = random.choice([1, 2, 3])
-        if choice == 1:
-            self.division_adder_im_2(element, div, number)
-        elif choice == 2:
-            self.division_adder_sub(element, div, number)
-        else:
-            self.division_adder_im_3(element, div, number)
-
-    def division_adder_im_2(self, element, div, number):
-        """
-        Add to asm code divided command of add or sub like:
-        add eax 5
-        add eax 3
-        Instead of add eax 8
-        :param element: list
-        :param div: number
-        :param number: number
-        :return: None
-        """
-        new_line = self.line_maker(element[0], div)
-        self.content.insert(self.content.index(element), [new_line])
-        self.content[self.content.index(element)] = \
-            [self.line_maker(element[0], number - div)]
-
-    def division_adder_im_3(self, element, div, number):
-        """
-        Add to asm code divided command of add or sub like:
-        add eax 1
-        add eax 4
-        add eax 3
-        Instead of add eax 8
-        :param element: list
-        :param div: number
-        :param number: number
-        :return: None
-        """
-        if div == 0:
-            new_div = 0
-        else:
-            new_div = self.number_division(div)
-        self.content.insert(self.content.index(element), [self.line_maker(element[0], new_div)])
-        self.content.insert(self.content.index(element), [self.line_maker(element[0], div - new_div)])
-        self.content[self.content.index(element)] = \
-            [self.line_maker(element[0], number - div)]
-
-    def division_adder_sub(self, element, div, number):
-        """
-        Function which transform single add or sub line.
-        F.E.:
-        Make from add eax, 10:
-        add eax, 13
-        sub eax, 3
-        :param element: list of string
-        :param div: number
-        :param number: number
-        :return: None
-        """
-        new_div = random.randint(number + 1, number + div + 1)
-        self.content.insert(self.content.index(element), [self.line_maker(element[0], new_div)])
-        self.content[self.content.index(element)] = \
-            [self.line_maker(element[0], new_div - number, True)]
-
-    def add_sub_adder(self, element):
-        """
-        Function which add two lines with add some number to eax and sub
-        this number from eax register.
-        :param element: list of elements
-        :return: None
-        """
-        reg = str()
-        if not self.add_sub_register:
-            for i in range(len(self.all_registers_lst)):
-                if self.all_registers_lst[i] not in self.register_lst\
-                        and self.all_registers_lst[i] != self.stack_register:
-                    reg = self.all_registers_lst[i]
-                    self.add_sub_register = self.all_registers_lst[i]
-                    break
-        else:
-            reg = self.add_sub_register
-        index = self.content.index(element)
-        number = self.number_division(10)
-        self.content.insert(index, ['sub {}, {}'.format(reg, str(number))])
-        self.content.insert(index, ['add {}, {}'.format(reg, str(number))])
-
-    def stack_adder(self, element):
-        """
-        Add to asm code push and pop of some register.
-        :param element: list of elements
-        :return: None
-        """
-        reg = str()
-        if not self.stack_register:
-            for i in range(len(self.all_registers_lst)):
-                if self.all_registers_lst[i] not in self.register_lst\
-                        and self.add_sub_register != self.all_registers_lst[i]:
-                    reg = self.all_registers_lst[i]
-                    self.stack_register = self.all_registers_lst[i]
-                    break
-        else:
-            reg = self.stack_register
-        index = self.content.index(element)
-        self.content.insert(index, [f'pop {reg}'])
-        self.content.insert(index, [f'push {reg}'])
-
-    def stack_nop_adder(self, element):
-        """
-        Add to code push pop of the register and nop between them.
-        :param element: list of string
-        :return: None
-        """
-        reg = str()
-        if not self.stack_register:
-            for i in range(len(self.all_registers_lst)):
-                if self.all_registers_lst[i] not in self.register_lst \
-                        and self.add_sub_register != self.all_registers_lst[i]:
-                    reg = self.all_registers_lst[i]
-                    self.stack_register = self.all_registers_lst[i]
-                    break
-        else:
-            reg = self.stack_register
-        index = self.content.index(element)
-        self.content.insert(index, [f'pop {reg}'])
-        self.content.insert(index, ['nop'])
-        self.content.insert(index, [f'push {reg}'])
-
-    def swap_of_reg(self, element):
-        """
-        Swap to registers in cmp command
-        :param element: list of elements
-        :return: None
-        """
-        if len(element[0]) > 16:
-            return 0
-        l_reg = str()
-        f_reg = str()
-        length = len(element[0]) - 1
-        while element[0][length] != ',':
-            l_reg += element[0][length]
-            length -= 1
-        while element[0][length] != 'p':
-            f_reg += element[0][length]
-            length -= 1
-        if l_reg[-1] == ' ':
-            l_reg = l_reg[:-1]
-        l_reg = l_reg[::-1]
-        if f_reg[-1] == ' ':
-            f_reg = f_reg[:-1]
-        f_reg = f_reg[::-1]
-        f_reg = f_reg[:-1]
-        if f_reg.isdecimal() or l_reg.isdecimal():
-            return 0
-        self.content[self.content.index(element)] = [f"cmp {l_reg}, {f_reg}"]
-
-    def commands_transformer(self):
-        """
-        Modify every mov, jmp, jk, je command.
-        :return: None
-        """
-        for i in range(len(self.mov_xor_jmp_je_jk_lst)):
-            choice = random.choice([1, 2, 3, 4])
-            if choice == 1:
-                self.nope_adder(self.mov_xor_jmp_je_jk_lst[i])
-            elif choice == 2:
-                self.add_sub_adder(self.mov_xor_jmp_je_jk_lst[i])
-            elif choice == 3:
-                self.stack_nop_adder(self.mov_xor_jmp_je_jk_lst[i])
-            else:
-                self.stack_adder(self.mov_xor_jmp_je_jk_lst[i])
-
-    def add_sub_transformer(self):
-        """
-        Modify every add and sub command.
-        :return: None
-        """
-        self.set_border()
-        for i in range(len(self.add_sub_lst_im)):
-            choice = random.choice([1, 2, 3])
-            if choice == 1:
-                self.nope_adder(self.add_sub_lst_im[i])
-            elif choice == 2:
-                self.stack_adder(self.add_sub_lst_im[i])
-            else:
-                self.division_adder_im(self.add_sub_lst_im[i])
-        for i in range(len(self.add_sub_lst_reg)):
-            choice = random.choice([1, 2, 3])
-            if choice == 1:
-                self.nope_adder(self.add_sub_lst_reg[i])
-            elif choice == 2:
-                self.stack_adder(self.add_sub_lst_reg[i])
-            else:
-                self.add_sub_adder(self.add_sub_lst_reg[i])
-
-    def mul_transform(self):
-        """
-        Function to transform a mul command.
-        :return: None
-        """
-        for i in range(2, len(self.mul_lst), 3):
-            choice = random.choice([i - 1, i - 2])
-            element = self.mul_lst[choice]
-            length = len(element[0])
-            number = str()
-            register = str()
-            while element[0][length - 1] != ',':
-                number += element[0][length - 1]
-                length -= 1
-            number = int(number[::-1])
-            div = self.number_division(number)
-            line = self.line_maker(element[0], div)
-            self.content[self.content.index(element)] = [line]
-            while element[0][length - 1] != ' ':
-                register += element[0][length - 1]
-                length -= 1
-            register = register[::-1]
-            self.content.insert(self.content.index([line]) + 1, ['add {} {}'.format(register, str(number - div))])
-
-    def cmp_transform(self):
-        """
-        Function to transform cmp command.
-        :return: None
-        """
-        for i in range(len(self.cmp_lst)):
-            choice = random.choice([1, 2, 3])
-            choice = 3
-            if choice == 1:
-                self.nope_adder(self.cmp_lst[i])
-            elif choice == 2:
-                self.stack_adder(self.cmp_lst[i])
-            else:
-                self.swap_of_reg(self.cmp_lst[i])
-
-    def polymorph(self):
-        """
-        Make code polymorphous and write it to new asm file.
-        :return:  None
-        """
-        self.reader()
-        self.parser_add_sub()
-        self.parser_mul()
-        self.parser_commands()
-        self.parser_register()
-        self.parser_cmp()
-        self.set_border()
-        self.classification_add_sub()
-        self.commands_transformer()
-        self.add_sub_transformer()
-        self.mul_transform()
-        self.cmp_transform()
-        content = str()
-        for i in range(len(self.content)):
-            content += self.content[i][0]
-            if i != len(self.content) - 1:
-                content += '\n'
-        with open(f"{self.path[:-4]}_pol.asm", 'w') as f:
-            f.write(content)
-
-
-if __name__ == "__main__":
-    a = SimplePol("simple.asm")
-    a.polymorph()
-    print(a.register_lst)
-
-# --- Core IME Framework ---
 from abc import ABC, abstractmethod
-# import copy # May be useful for entities if mutations sometimes return new objects
+import copy
+import uuid
+from typing import Any, List, Optional, Dict, Type
 
-class MutableEntity:
-    """
-    Represents an entity that can be mutated by MutationOperators.
-    It acts as a wrapper around the actual data/object being mutated.
-    """
-    def __init__(self, data):
-        self._data = data # The actual content to be mutated
-        # In the future, we might add metadata, type hints, constraints, etc.
-
-    @property
-    def data(self):
-        """Provides access to the internal data.
-           Mutation operators will modify internal _data directly or via methods.
-        """
-        return self._data
-
-    @data.setter
-    def data(self, new_data):
-        """Allows direct setting of data. Useful for initialization or reset.
-           Careful consideration if this should be broadly used vs. mutation.
-        """
-        self._data = new_data
-
-    def __str__(self):
-        return f"MutableEntity(data={str(self._data)})"
-
-    # Consider adding a clone method if needed for specific mutation strategies
-    # def clone(self):
-    #     import copy
-    #     return MutableEntity(copy.deepcopy(self._data))
-
-class MutationOperator(ABC):
-    """
-    Abstract Base Class for all mutation operators.
-    A mutation operator defines a specific way to change a MutableEntity.
-    """
-
-    @abstractmethod
-    def apply(self, entity: MutableEntity) -> None:
-        """
-        Applies the mutation to the given MutableEntity.
-        This method should modify the entity's internal data.
-        """
-        pass
-
-    def can_apply(self, entity: MutableEntity) -> bool:
-        """
-        Checks if this operator can be applied to the given entity.
-        By default, operators can apply to any entity. Subclasses can override this
-        for more specific applicability checks (e.g., based on data type).
-        Returns True if applicable, False otherwise.
-        """
-        return True
-
-# --- Basic Mutation Operators ---
-
-class IntegerPerturbationOperator(MutationOperator):
-    """
-    Mutates an integer by adding a small random value to it.
-    """
-    def __init__(self, perturbation_range=(-5, 5)):
-        super().__init__()
-        if not (isinstance(perturbation_range, tuple) and
-                len(perturbation_range) == 2 and
-                isinstance(perturbation_range[0], int) and
-                isinstance(perturbation_range[1], int) and
-                perturbation_range[0] <= perturbation_range[1]):
-            raise ValueError("perturbation_range must be a tuple of two integers (min, max) with min <= max.")
-        self.min_perturb, self.max_perturb = perturbation_range
-
-    def can_apply(self, entity: MutableEntity) -> bool:
-        return isinstance(entity.data, int)
-
-    def apply(self, entity: MutableEntity) -> None:
-        if not self.can_apply(entity):
-            # Or raise an error, or log a warning
-            return
-
-        perturbation = random.randint(self.min_perturb, self.max_perturb)
-        # Ensure perturbation is not zero, to guarantee a change (optional, depends on desired behavior)
-        while perturbation == 0 and self.min_perturb != self.max_perturb : # Avoid infinite loop if range is (0,0)
-            perturbation = random.randint(self.min_perturb, self.max_perturb)
-
-        entity.data += perturbation
-
-class StringReplaceOperator(MutationOperator):
-    """
-    Mutates a string by replacing a random character with another random printable ASCII character.
-    """
-    def can_apply(self, entity: MutableEntity) -> bool:
-        return isinstance(entity.data, str) and len(entity.data) > 0
-
-    def apply(self, entity: MutableEntity) -> None:
-        if not self.can_apply(entity):
-            return
-
-        s = entity.data
-        idx = random.randrange(len(s))
-        # ASCII printable characters range from 32 (space) to 126 (~)
-        new_char_code = random.randint(32, 126)
-        original_char = s[idx]
-        new_char = chr(new_char_code)
-
-        # Ensure the new character is different from the original (optional)
-        while new_char == original_char and len(set(s)) > 1 : # Avoid infinite loop if all chars are the same
-            new_char_code = random.randint(32, 126)
-            new_char = chr(new_char_code)
-
-        entity.data = s[:idx] + new_char + s[idx+1:]
-
-class ListElementSwapOperator(MutationOperator):
-    """
-    Mutates a list by swapping two randomly selected distinct elements.
-    """
-    def can_apply(self, entity: MutableEntity) -> bool:
-        return isinstance(entity.data, list) and len(entity.data) >= 2
-
-    def apply(self, entity: MutableEntity) -> None:
-        if not self.can_apply(entity):
-            return
-
-        lst = entity.data
-        idx1, idx2 = random.sample(range(len(lst)), 2) # Ensures two distinct indices
-
-        lst[idx1], lst[idx2] = lst[idx2], lst[idx1]
-        # No need to set entity.data = lst as list is modified in-place
-
-# --- Mutation Engine ---
-
-class MutationEngine:
-    """
-    Orchestrates the mutation process on a MutableEntity using a set of MutationOperators.
-    """
-    def __init__(self, operators: list[MutationOperator], mutation_probability: float = 1.0):
-        if not operators or not all(isinstance(op, MutationOperator) for op in operators):
-            raise ValueError("MutationEngine requires a non-empty list of MutationOperator instances.")
-        if not (0.0 <= mutation_probability <= 1.0):
-            raise ValueError("Mutation probability must be between 0.0 and 1.0.")
-        self.operators = operators
-        self.mutation_probability = mutation_probability # Placeholder for adaptive rate
-
-    def evaluate_entity(self, entity: MutableEntity) -> float:
-        """
-        Evaluates the fitness or quality of a MutableEntity.
-        Placeholder: In a real scenario, this would involve a complex assessment.
-        Returns a numerical score (higher is generally better).
-        """
-        # print(f"Placeholder: Evaluating entity {entity}. Score: 0.0 (Not implemented)")
-        return 0.0 # Default score
-
-    def mutate_once(self, entity: MutableEntity) -> bool:
-        """
-        Attempts to apply a single, randomly chosen, applicable mutation operator
-        to the given entity.
-
-        Args:
-            entity: The MutableEntity to mutate.
-
-        Returns:
-            True if a mutation was successfully applied, False otherwise.
-        """
-        if random.random() >= self.mutation_probability:
-            # Optional: print("Mutation skipped due to probability.")
-            return False # Skipped due to probability
-
-        applicable_operators = [op for op in self.operators if op.can_apply(entity)]
-
-        if not applicable_operators:
-            # Optional: print(f"Warning: No applicable operators found for entity: {entity}")
-            return False
-
-        operator_to_apply = random.choice(applicable_operators)
-        # Optional: print(f"Applying {operator_to_apply.__class__.__name__} to {entity}")
-        operator_to_apply.apply(entity)
-
-        # Placeholder for where evaluation might be used after a mutation
-        # current_score = self.evaluate_entity(entity)
-        # print(f"Entity score after mutation: {current_score}")
-        return True
-
-    def run(self, entity: MutableEntity, num_mutations: int) -> int:
-        """
-        Applies a sequence of mutations to the entity.
-
-        Args:
-            entity: The MutableEntity to mutate.
-            num_mutations: The desired number of mutation steps to perform.
-
-        Returns:
-            The number of successful mutations applied.
-        """
-        if num_mutations < 0:
-            raise ValueError("Number of mutations cannot be negative.")
-
-        successful_mutations = 0
-        for _ in range(num_mutations):
-            if self.mutate_once(entity):
-                successful_mutations += 1
-        return successful_mutations
-
-# --- Architectural Graph Representation for Neural Networks (and potentially other structures) ---
-
-import uuid # For generating unique IDs
-
-class ArchitecturalNode:
-    """Represents a node in an architectural graph (e.g., a neuron, a layer component)."""
-    def __init__(self, node_id: str = None, node_type: str = "generic", properties: dict = None):
-        self.id = node_id if node_id is not None else str(uuid.uuid4())
-        self.node_type = node_type
-        self.properties = properties if properties is not None else {} # e.g., activation_function, bias, value
-
-    def __str__(self):
-        return f"Node(id={self.id}, type={self.node_type}, props={self.properties})"
-
-class ArchitecturalEdge:
-    """Represents an edge (connection) between two ArchitecturalNodes."""
-    def __init__(self, source_node_id: str, target_node_id: str, edge_id: str = None, weight: float = 0.0, properties: dict = None):
-        self.id = edge_id if edge_id is not None else str(uuid.uuid4())
-        if not source_node_id or not target_node_id:
-            raise ValueError("Source and target node IDs must be provided for an edge.")
-        self.source_node_id = source_node_id
-        self.target_node_id = target_node_id
-        self.weight = weight
-        self.properties = properties if properties is not None else {} # e.g., is_recurrent, delay
-
-    def __str__(self):
-        return f"Edge(id={self.id}, from={self.source_node_id}, to={self.target_node_id}, w={self.weight}, props={self.properties})"
-
-class PartitionSchema:
-    """
-    Represents a way of partitioning a set of elements within a NetworkGraph,
-    inspired by Bell numbers and set partitions.
-    """
-    def __init__(self, name: str, target_element_type: str,
-                 partitions: list[set[str]], schema_id: str = None, metadata: dict = None):
-        self.id = schema_id if schema_id is not None else str(uuid.uuid4())
-        self.name = name # e.g., "LayerPartitioning", "ModuleAffinity"
-        # e.g., "nodes", "edges", or a custom tag from node/edge properties
-        self.target_element_type = target_element_type
-        self.partitions = partitions # list of sets, where each set contains IDs of elements in that partition
-        self.metadata = metadata if metadata is not None else {} # e.g., description, parameters of the partitioning algorithm
-
-    def __str__(self):
-        return (f"PartitionSchema(id={self.id}, name='{self.name}', type='{self.target_element_type}', "
-                f"num_partitions={len(self.partitions)})")
-
-class NetworkGraph:
-    """Represents a neural network (or other system) as a graph of nodes and edges."""
-    def __init__(self, graph_id: str = None, properties: dict = None):
-        self.id = graph_id if graph_id is not None else str(uuid.uuid4())
-        self.nodes: dict[str, ArchitecturalNode] = {}
-        self.edges: dict[str, ArchitecturalEdge] = {}
-        # Adjacency list for quick lookup of connections:
-        # node_id -> {'in': [edge_id, ...], 'out': [edge_id, ...]}
-        self.adj: dict[str, dict[str, list[str]]] = {}
-        self.properties = properties if properties is not None else {} # e.g., name, description
-        self.partition_schemas: list[PartitionSchema] = [] # For Bell Superalgebra concepts
-
-    def add_node(self, node: ArchitecturalNode):
-        if node.id in self.nodes:
-            raise ValueError(f"Node with ID {node.id} already exists.")
-        self.nodes[node.id] = node
-        self.adj[node.id] = {'in': [], 'out': []}
-
-    def remove_node(self, node_id: str):
-        if node_id not in self.nodes:
-            # Or raise error: raise ValueError(f"Node with ID {node_id} not found.")
-            return
-
-        # Remove associated edges first
-        # Use list(self.edges.keys()) to avoid issues with modifying dict during iteration
-        for edge_id in list(self.edges.keys()):
-            edge = self.edges[edge_id]
-            if edge.source_node_id == node_id or edge.target_node_id == node_id:
-                self.remove_edge(edge_id) # remove_edge will also update adjacency list
-
-        if node_id in self.nodes: # Check if node still exists before deleting
-            del self.nodes[node_id]
-        if node_id in self.adj: # Check if adj entry still exists
-            del self.adj[node_id]
-
-    def add_edge(self, edge: ArchitecturalEdge):
-        if edge.id in self.edges:
-            raise ValueError(f"Edge with ID {edge.id} already exists.")
-        if edge.source_node_id not in self.nodes:
-            raise ValueError(f"Source node with ID {edge.source_node_id} not found for edge {edge.id}.")
-        if edge.target_node_id not in self.nodes:
-            raise ValueError(f"Target node with ID {edge.target_node_id} not found for edge {edge.id}.")
-
-        self.edges[edge.id] = edge
-        if edge.source_node_id in self.adj:
-            self.adj[edge.source_node_id]['out'].append(edge.id)
-        else: # Should not happen if nodes are added correctly
-            self.adj[edge.source_node_id] = {'in': [], 'out': [edge.id]}
-
-        if edge.target_node_id in self.adj:
-            self.adj[edge.target_node_id]['in'].append(edge.id)
-        else: # Should not happen
-            self.adj[edge.target_node_id] = {'in': [edge.id], 'out': []}
-
-
-    def remove_edge(self, edge_id: str):
-        if edge_id not in self.edges:
-            # Or raise error
-            return
-
-        edge = self.edges[edge_id]
-        if edge.source_node_id in self.adj and edge_id in self.adj[edge.source_node_id]['out']:
-            self.adj[edge.source_node_id]['out'].remove(edge.id)
-        if edge.target_node_id in self.adj and edge_id in self.adj[edge.target_node_id]['in']:
-            self.adj[edge.target_node_id]['in'].remove(edge.id)
-
-        if edge_id in self.edges: # Check if edge still exists
-            del self.edges[edge_id]
-
-    def get_node(self, node_id: str) -> ArchitecturalNode | None:
-        return self.nodes.get(node_id)
-
-    def get_edge(self, edge_id: str) -> ArchitecturalEdge | None:
-        return self.edges.get(edge_id)
-
-    def get_incoming_edges(self, node_id: str) -> list[ArchitecturalEdge]:
-        if node_id not in self.adj: return [] # Changed from self.nodes to self.adj
-        return [self.edges[edge_id] for edge_id in self.adj[node_id]['in'] if edge_id in self.edges]
-
-    def get_outgoing_edges(self, node_id: str) -> list[ArchitecturalEdge]:
-        if node_id not in self.adj: return [] # Changed from self.nodes to self.adj
-        return [self.edges[edge_id] for edge_id in self.adj[node_id]['out'] if edge_id in self.edges]
-
-    def add_partition_schema(self, schema: PartitionSchema):
-        self.partition_schemas.append(schema)
-
-    def __str__(self):
-        return (f"NetworkGraph(id={self.id}, nodes={len(self.nodes)}, edges={len(self.edges)}, "
-                f"partitions={len(self.partition_schemas)}, props={self.properties})")
-
-# Note: The MutableEntity class defined earlier would now be expected to hold an instance of NetworkGraph
-# in its self._data field when working with neural network architectures.
-# MutationOperators will need to be designed to operate on this NetworkGraph structure.
-
-# --- Superalgebraic Reconfiguration Operator (SRO) Stubs ---
-
-class RepartitionGraphOperator(MutationOperator):
-    """
-    Performs a superalgebraic reconfiguration by changing how a NetworkGraph's
-    elements (e.g., nodes) are partitioned, potentially leading to new
-    PartitionSchema objects or modification of existing ones.
-    This can then be used by other operators to guide structural changes.
-    """
-    def __init__(self, target_element_type: str = "nodes",
-                 min_partitions: int = 1,
-                 max_partitions: int = -1, # -1 means up to num_elements
-                 new_schema_name_prefix: str = "Repartitioned"):
-        super().__init__()
-        self.target_element_type = target_element_type # "nodes", "edges", or based on a property
-        self.min_partitions = min_partitions
-        self.max_partitions = max_partitions
-        self.new_schema_name_prefix = new_schema_name_prefix
-        # Future params: partitioning strategy (e.g., random, community detection based, feature-based)
-
-    def can_apply(self, entity: MutableEntity) -> bool:
-        if not isinstance(entity.data, NetworkGraph):
-            return False
-        graph: NetworkGraph = entity.data
-        if self.target_element_type == "nodes":
-            return len(graph.nodes) > 0
-        # TODO: Add checks for other element types if supported (e.g., edges)
-        # For now, only "nodes" is a valid target_element_type for this stub
-        return False
-
-    def apply(self, entity: MutableEntity) -> None:
-        """
-        Modifies entity.data (a NetworkGraph) by:
-        1. Selecting a set of target elements (currently only 'nodes').
-        2. Generating a new partitioning of these elements.
-        3. Storing this as a new PartitionSchema in the graph's `partition_schemas` list.
-        """
-        if not isinstance(entity.data, NetworkGraph): # Double check, though can_apply should catch
-            print(f"Warning: {self.__class__.__name__} called on non-NetworkGraph entity.")
-            return
-
-        graph: NetworkGraph = entity.data
-
-        # Explicitly check for node partitioning as it's the only one semi-implemented
-        if self.target_element_type != "nodes" or not graph.nodes:
-            # print(f"Info: {self.__class__.__name__} cannot apply to target_element_type '{self.target_element_type}' or graph has no nodes.")
-            return
-
-        print(f"SRO Stub: Applying {self.__class__.__name__} to graph {graph.id}")
-        print(f"  Targeting element type: {self.target_element_type}")
-
-        elements_to_partition_ids = list(graph.nodes.keys())
-        num_elements = len(elements_to_partition_ids)
-
-        if num_elements == 0:
-            print("  No elements to partition.")
-            return
-
-        # Determine number of partitions (k)
-        max_k = self.max_partitions if self.max_partitions > 0 and self.max_partitions <= num_elements else num_elements
-        min_k = max(1, self.min_partitions)
-        if min_k > max_k : min_k = max_k
-
-        if max_k == 0: # This case should ideally not be reached if num_elements > 0
-            print("  Cannot create partitions with max_k=0.")
-            return
-        if min_k == 0 and max_k == 0 :
-             print("  min_k and max_k are zero, no partitions to form.")
-             return
-
-
-        k = random.randint(min_k, max_k)
-        if k == 0 and num_elements > 0 :
-            k = 1 # Default to 1 partition if k somehow becomes 0 with elements present
-
-        new_partitions_list: list[set[str]] = [set() for _ in range(k)]
-
-        temp_elements = list(elements_to_partition_ids)
-        random.shuffle(temp_elements)
-
-        # Assign first k elements to k distinct partitions to ensure non-emptiness if possible
-        # and k <= num_elements
-        if k > 0: # Proceed only if k is positive
-            for i in range(k):
-                if temp_elements:
-                    new_partitions_list[i].add(temp_elements.pop())
-
-            # Assign remaining elements randomly to any of the k partitions
-            for remaining_element_id in temp_elements:
-                target_partition_idx = random.randrange(k) # k is guaranteed > 0 here
-                new_partitions_list[target_partition_idx].add(remaining_element_id)
-
-        final_partitions = [p for p in new_partitions_list if p] # Keep only non-empty sets
-
-        if final_partitions:
-            schema_name = f"{self.new_schema_name_prefix}_{self.target_element_type}_{str(uuid.uuid4())[:4]}"
-            new_schema = PartitionSchema(name=schema_name,
-                                       target_element_type=self.target_element_type,
-                                       partitions=final_partitions)
-            graph.add_partition_schema(new_schema)
-            print(f"  Added new PartitionSchema: {new_schema.name} with {len(final_partitions)} partitions.")
-        else:
-            print("  No valid partitions were formed (all partitions were empty).")
-
-
-class PartitionBasedRewireOperator(MutationOperator):
-    """
-    (Stub) Rewires a NetworkGraph based on an existing PartitionSchema.
-    It changes connections *between* and *within* partitions according
-    to a specified strategy (e.g., fully connect, sparsely connect, create bottlenecks).
-    """
-    def __init__(self, partition_schema_name_or_id: str = None,
-                 inter_partition_strategy: str = "random_sparse",
-                 intra_partition_strategy: str = "maintain",
-                 connection_density: float = 0.1,
-                 default_weight_sampler=lambda: random.uniform(-1,1)
-                 ):
-        super().__init__()
-        self.partition_schema_name_or_id = partition_schema_name_or_id
-        self.inter_partition_strategy = inter_partition_strategy
-        self.intra_partition_strategy = intra_partition_strategy
-        self.connection_density = connection_density
-        self.default_weight_sampler = default_weight_sampler
-
-    def can_apply(self, entity: MutableEntity) -> bool:
-        if not isinstance(entity.data, NetworkGraph):
-            return False
-        graph: NetworkGraph = entity.data
-        if not graph.partition_schemas:
-            return False
-        if self.partition_schema_name_or_id:
-            return any(s.id == self.partition_schema_name_or_id or s.name == self.partition_schema_name_or_id
-                       for s in graph.partition_schemas)
-        return True
-
-    def _get_nodes_from_partition(self, graph: NetworkGraph, partition_set: set[str], schema: PartitionSchema) -> list[ArchitecturalNode]:
-        """Helper to get actual node objects from a set of IDs in a partition."""
-        if schema.target_element_type == "nodes": # Ensure schema targets nodes
-            return [node for node_id in partition_set if (node := graph.get_node(node_id)) is not None]
-        return []
-
-    def apply(self, entity: MutableEntity) -> None:
-        if not self.can_apply(entity):
-            return
-
-        graph: NetworkGraph = entity.data
-
-        selected_schema: PartitionSchema | None = None
-        if self.partition_schema_name_or_id:
-            for s_candidate in graph.partition_schemas:
-                if s_candidate.id == self.partition_schema_name_or_id or s_candidate.name == self.partition_schema_name_or_id:
-                    selected_schema = s_candidate
-                    break
-        elif graph.partition_schemas: # If no specific schema name, pick one randomly
-            selected_schema = random.choice(graph.partition_schemas)
-
-        if not selected_schema:
-            print(f"SRO Stub ({self.__class__.__name__}): No suitable PartitionSchema found or provided for graph {graph.id}.")
-            return
-
-        print(f"SRO Stub: Applying {self.__class__.__name__} to graph {graph.id} using PartitionSchema: {selected_schema.name}")
-
-        if selected_schema.target_element_type != "nodes":
-            print(f"  Skipping: Rewiring currently only implemented for node-based partitions. Schema is for '{selected_schema.target_element_type}'.")
-            return
-
-        if self.inter_partition_strategy == "random_sparse" and len(selected_schema.partitions) >= 2:
-            num_new_edges = 0
-            for i in range(len(selected_schema.partitions)):
-                for j in range(i + 1, len(selected_schema.partitions)):
-                    partition1_nodes = self._get_nodes_from_partition(graph, selected_schema.partitions[i], selected_schema)
-                    partition2_nodes = self._get_nodes_from_partition(graph, selected_schema.partitions[j], selected_schema)
-
-                    if not partition1_nodes or not partition2_nodes: continue
-
-                    for n1 in partition1_nodes:
-                        for n2 in partition2_nodes:
-                            # Try adding edge from n1 to n2
-                            if random.random() < self.connection_density:
-                                new_edge_fwd = ArchitecturalEdge(source_node_id=n1.id, target_node_id=n2.id, weight=self.default_weight_sampler())
-                                try: graph.add_edge(new_edge_fwd); num_new_edges +=1
-                                except ValueError: pass
-
-                            # Try adding edge from n2 to n1
-                            if random.random() < self.connection_density:
-                                new_edge_bwd = ArchitecturalEdge(source_node_id=n2.id, target_node_id=n1.id, weight=self.default_weight_sampler())
-                                try: graph.add_edge(new_edge_bwd); num_new_edges +=1
-                                except ValueError: pass
-            if num_new_edges > 0:
-                print(f"  Added {num_new_edges} new inter-partition edges using 'random_sparse' strategy.")
-            else:
-                print(f"  No new inter-partition edges added with 'random_sparse' (density: {self.connection_density}).")
-
-        print(f"SRO Stub ({self.__class__.__name__}): Placeholder rewiring logic executed.")
-        pass
-
-# --- Fractal Scale Mutation Operator (FMO) Stubs ---
-import copy # For deepcopying substructures
-
-class HierarchicalNoiseInjectionFMO(MutationOperator):
-    """
-    (Stub) Applies noise or perturbations fractally across different scales
-    of a NetworkGraph, based on the FractalMutationProtocol.
-    """
-    def __init__(self, base_noise_level: float = 0.05,
-                 target_scales: list[str] = None,
-                 decay_factor: float = 0.5):
-        super().__init__()
-        self.base_noise_level = base_noise_level
-        self.target_scales = target_scales if target_scales is not None else ["micro", "meso"]
-        self.decay_factor = decay_factor
-
-    def can_apply(self, entity: MutableEntity) -> bool:
-        return isinstance(entity.data, NetworkGraph)
-
-    def apply(self, entity: MutableEntity) -> None:
-        if not self.can_apply(entity): return
-
-        graph: NetworkGraph = entity.data
-        print(f"FMO Stub: Applying {self.__class__.__name__} to graph {graph.id}")
-        print(f"  Base noise level: {self.base_noise_level}, Target scales: {self.target_scales}")
-
-        current_noise_level = self.base_noise_level
-        if "meta" in self.target_scales:
-            print(f"  META: Perturbing graph.properties (conceptual).")
-            current_noise_level *= self.decay_factor
-        if "macro" in self.target_scales:
-            print(f"  MACRO: Perturbing overall topology (conceptual).")
-            current_noise_level *= self.decay_factor
-        if "meso" in self.target_scales:
-            print(f"  MESO: Perturbing layer/module properties (conceptual).")
-            current_noise_level *= self.decay_factor
-        if "micro" in self.target_scales:
-            print(f"  MICRO: Perturbing node/edge properties (weights, biases).")
-            num_edges_perturbed = 0
-            for edge in graph.edges.values():
-                edge.weight += random.uniform(-current_noise_level, current_noise_level)
-                num_edges_perturbed+=1
-            num_nodes_perturbed = 0
-            for node in graph.nodes.values():
-                if 'bias' in node.properties and isinstance(node.properties['bias'], (int, float)):
-                     node.properties['bias'] += random.uniform(-current_noise_level, current_noise_level)
-                     num_nodes_perturbed+=1
-            print(f"    Applied noise to {num_edges_perturbed} edge weights and {num_nodes_perturbed} node biases (if 'bias' property exists and is numeric).")
-        print(f"FMO Stub ({self.__class__.__name__}): Placeholder noise injection logic executed.")
-        pass
-
-
-class SelfSimilarGrowthFMO(MutationOperator):
-    """
-    (Stub) Grows a NetworkGraph by adding new structures (nodes, edges) that are
-    self-similar to existing structures or based on a fractal generation rule.
-    """
-    def __init__(self, growth_complexity: int = 1,
-                 target_scales: list[str] = None,
-                 min_motif_size: int = 2, max_motif_size: int = 5):
-        super().__init__()
-        self.growth_complexity = growth_complexity
-        self.target_scales = target_scales if target_scales is not None else ["meso"]
-        self.min_motif_size = min_motif_size
-        self.max_motif_size = max_motif_size
-
-    def can_apply(self, entity: MutableEntity) -> bool:
-        if not isinstance(entity.data, NetworkGraph): return False
-        return len(entity.data.nodes) >= self.min_motif_size
-
-    def _find_structural_motif(self, graph: NetworkGraph) -> tuple[list[ArchitecturalNode], list[ArchitecturalEdge]] | None:
-        if len(graph.nodes) < self.min_motif_size: return None
-
-        motif_nodes_map = {}
-        motif_edges_list = []
-        all_node_ids = list(graph.nodes.keys())
-        if not all_node_ids: return None
-        start_node_id = random.choice(all_node_ids)
-
-        q = [start_node_id]
-        visited_for_motif = {start_node_id}
-
-        while q and len(motif_nodes_map) < self.max_motif_size:
-            curr_id = q.pop(0)
-            node = graph.get_node(curr_id)
-            if node: motif_nodes_map[node.id] = copy.deepcopy(node)
-
-            for edge_obj in graph.get_outgoing_edges(curr_id):
-                if len(motif_nodes_map) + len(q) >= self.max_motif_size and edge_obj.target_node_id not in visited_for_motif:
-                    continue
-                if edge_obj.target_node_id not in visited_for_motif:
-                    q.append(edge_obj.target_node_id)
-                    visited_for_motif.add(edge_obj.target_node_id)
-                if edge_obj.target_node_id in visited_for_motif:
-                     motif_edges_list.append(copy.deepcopy(edge_obj))
-            for edge_obj in graph.get_incoming_edges(curr_id):
-                if edge_obj.source_node_id in motif_nodes_map:
-                     is_duplicate = any(e.id == edge_obj.id for e in motif_edges_list) or \
-                                    any(e.source_node_id == edge_obj.source_node_id and \
-                                        e.target_node_id == edge_obj.target_node_id for e in motif_edges_list)
-                     if not is_duplicate: motif_edges_list.append(copy.deepcopy(edge_obj))
-
-        if len(motif_nodes_map) >= self.min_motif_size:
-            return list(motif_nodes_map.values()), motif_edges_list
-        return None
-
-    def _replicate_and_attach_motif(self, graph: NetworkGraph,
-                                   motif_nodes: list[ArchitecturalNode],
-                                   motif_edges: list[ArchitecturalEdge]):
-        if not motif_nodes: return
-        id_map = {}
-        new_nodes_added = []
-        for motif_node in motif_nodes:
-            new_node_id = str(uuid.uuid4())
-            id_map[motif_node.id] = new_node_id
-            new_node = ArchitecturalNode(node_id=new_node_id, node_type=motif_node.node_type, properties=copy.deepcopy(motif_node.properties))
-            try: graph.add_node(new_node); new_nodes_added.append(new_node)
-            except ValueError as e:
-                print(f"Warning: Could not add node during motif replication: {e}")
-                if motif_node.id in id_map: del id_map[motif_node.id]
-        for motif_edge in motif_edges:
-            if motif_edge.source_node_id in id_map and motif_edge.target_node_id in id_map:
-                new_edge = ArchitecturalEdge(source_node_id=id_map[motif_edge.source_node_id],
-                                             target_node_id=id_map[motif_edge.target_node_id],
-                                             weight=motif_edge.weight, properties=copy.deepcopy(motif_edge.properties))
-                try: graph.add_edge(new_edge)
-                except ValueError as e: print(f"Warning: Could not add edge during motif replication: {e}")
-        if new_nodes_added:
-            existing_ids = [nid for nid in graph.nodes.keys() if nid not in id_map.values()]
-            if existing_ids:
-                s_node, t_node = (random.choice(existing_ids), random.choice(new_nodes_added).id) \
-                                 if random.choice([True, False]) else \
-                                 (random.choice(new_nodes_added).id, random.choice(existing_ids))
-                conn_edge = ArchitecturalEdge(source_node_id=s_node, target_node_id=t_node, weight=random.uniform(-0.1,0.1))
-                try: graph.add_edge(conn_edge)
-                except ValueError as e: print(f"Warning: Could not attach motif: {e}")
-
-    def apply(self, entity: MutableEntity) -> None:
-        if not self.can_apply(entity): return
-        graph: NetworkGraph = entity.data
-        print(f"FMO Stub: Applying {self.__class__.__name__} to graph {graph.id}")
-        num_growths = 0
-        for _ in range(self.growth_complexity):
-            motif = self._find_structural_motif(graph)
-            if motif and motif[0]: self._replicate_and_attach_motif(graph, motif[0], motif[1]); num_growths+=1
-            else: break
-        print(f"  Completed {num_growths} growth operations." if num_growths > 0 else "  No growth operations completed.")
-        pass
-
-# --- Smart Mutation Engine ---
-try:
-    from .reprogrammable_selector_nn import ReprogrammableSelectorNN
-    from . import feature_extractors
-except ImportError:
-    from reprogrammable_selector_nn import ReprogrammableSelectorNN
-    import feature_extractors
-    print("Warning: SmartMutationEngine (in engine.py) using fallback imports for NN and feature_extractors module.")
-# Need torch for the conceptual training feedback, ensure it's handled if not present
 try:
     import torch
 except ImportError:
-    pass # torch is optional for the current placeholder train_step
+    pass
 
+# --- Imports for SmartMutationEngine ---
+try:
+    from .reprogrammable_selector_nn import ReprogrammableSelectorNN, PYG_AVAILABLE, PyGData
+except ImportError:
+    ReprogrammableSelectorNN = type(None)
+    PYG_AVAILABLE = False
+    class PyGData: pass
+
+try:
+    from . import feature_extractors
+    DEFAULT_FEATURE_CONFIG_FROM_MODULE = feature_extractors.DEFAULT_FEATURE_CONFIG
+except ImportError:
+    feature_extractors = None
+    DEFAULT_FEATURE_CONFIG_FROM_MODULE = {}
+
+try:
+    from .rl_utils import ExperienceReplayBuffer
+except ImportError:
+    ExperienceReplayBuffer = type(None)
+
+
+class SimplePol:
+    def __init__(self, path):
+        self.stack_register = None; self.add_sub_register = None; self.border_pos = None
+        self.all_registers_lst = ['rdx','rax','rcx','rsi','r11','rdi','rbx','r8','r10','r9','r12','r13','r14','r15','rbp','rsp']
+        self.path=path; self.content=list(); self.mov_xor_jmp_je_jk_lst=list(); self.add_sub_lst=list()
+        self.add_sub_lst_im=list(); self.add_sub_lst_reg=list(); self.register_lst=list(); self.mul_lst=list(); self.cmp_lst=list()
+    def reader(self):
+        with open(self.path) as f:
+            for line in f: self.content.append(line.strip().split('\n'))
+    def parser(self,word,lst):
+        for i in range(len(self.content)):
+            if re.match(word, self.content[i][0]): lst.append(self.content[i])
+    def parser_register(self):
+        for i in range(len(self.content)):
+            length=len(self.content[i][0]); register=str()
+            while length!=0:
+                if self.content[i][0][length-1]==',':
+                    while self.content[i][0][length-1]!=' ' and self.content[i][0][length-1]!='\t':
+                        length-=1
+                        if self.content[i][0][length-1].isalnum(): register+=self.content[i][0][length-1]
+                        else: break
+                    break
+                length-=1
+            if register: register=register[::-1]; self.register_lst.append(register)
+        self.register_lst=list(set(self.register_lst)); trash=list()
+        for i in range(len(self.register_lst)):
+            if len(self.register_lst[i])>3 or len(self.register_lst[i])<2: trash.append(self.register_lst[i])
+        for i in range(len(trash)): self.register_lst.remove(trash[i])
+    def parser_commands(self): self.parser(r"mov|jmp|je|jk|xor",self.mov_xor_jmp_je_jk_lst)
+    def parser_add_sub(self): self.parser(r"add|sub",self.add_sub_lst)
+    def parser_cmp(self): self.parser(r"cmp",self.cmp_lst)
+    def parser_mul(self):
+        self.parser(r"mul",self.mul_lst)
+        for i in range(len(self.mul_lst)):
+            index=self.content.index(self.mul_lst[i])
+            self.mul_lst.insert(i,self.content[index-1]); self.mul_lst.insert(i,self.content[index-2])
+    def set_border(self):
+        for i in range(len(self.content)):
+            if self.content[i] in self.mov_xor_jmp_je_jk_lst or self.content[i] in self.cmp_lst or \
+               self.content[i] in self.mul_lst or self.content[i] in self.add_sub_lst:
+                self.border_pos=self.content[i]; break
+    def classification_add_sub(self):
+        for i in range(len(self.add_sub_lst)):
+            if re.search(r', ?[0-9]+',self.add_sub_lst[i][0]): self.add_sub_lst_im.append(self.add_sub_lst[i])
+            else: self.add_sub_lst_reg.append(self.add_sub_lst[i])
+    @staticmethod
+    def number_division(number): return random.randrange(number)
+    @staticmethod
+    def line_maker(line,number,reverse=False):
+        new_line=str(); i=0
+        while line[i]!=',': new_line+=line[i]; i+=1
+        new_line+=','; new_line+=str(number)
+        if reverse and new_line[0]=='a': new_line=list(new_line); new_line[0:3]='s','u','b'; new_line=''.join(new_line)
+        elif reverse and new_line[0]=='s': new_line=list(new_line); new_line[0:3]='a','d','d'; new_line=''.join(new_line)
+        return new_line
+    def nope_adder(self,element): self.content.insert(self.content.index(element),['nop'])
+    def division_adder_im(self,element):
+        length=len(element[0]); number=str(); exact_number=str()
+        while element[0][length-1]!=',': number+=element[0][length-1]; length-=1
+        number=number.split()
+        for i in range(len(number)):
+            if number[i].isdecimal(): exact_number=number[i]; break
+        number=int(exact_number[::-1]); div=self.number_division(number); choice=random.choice([1,2,3])
+        if choice==1: self.division_adder_im_2(element,div,number)
+        elif choice==2: self.division_adder_sub(element,div,number)
+        else: self.division_adder_im_3(element,div,number)
+    def division_adder_im_2(self,element,div,number):
+        new_line=self.line_maker(element[0],div); self.content.insert(self.content.index(element),[new_line])
+        self.content[self.content.index(element)]=[self.line_maker(element[0],number-div)]
+    def division_adder_im_3(self,element,div,number):
+        new_div=self.number_division(div) if div!=0 else 0
+        self.content.insert(self.content.index(element),[self.line_maker(element[0],new_div)])
+        self.content.insert(self.content.index(element),[self.line_maker(element[0],div-new_div)])
+        self.content[self.content.index(element)]=[self.line_maker(element[0],number-div)]
+    def division_adder_sub(self,element,div,number):
+        new_div=random.randint(number+1,number+div+1)
+        self.content.insert(self.content.index(element),[self.line_maker(element[0],new_div)])
+        self.content[self.content.index(element)]=[self.line_maker(element[0],new_div-number,True)]
+    def add_sub_adder(self,element):
+        reg=self.add_sub_register
+        if not reg:
+            for r_cand in self.all_registers_lst:
+                if r_cand not in self.register_lst and r_cand!=self.stack_register: reg=r_cand;self.add_sub_register=r_cand;break
+        if reg: index=self.content.index(element);num=self.number_division(10);self.content.insert(index,[f'sub {reg}, {num}']);self.content.insert(index,[f'add {reg}, {num}'])
+    def stack_adder(self,element):
+        reg=self.stack_register
+        if not reg:
+            for r_cand in self.all_registers_lst:
+                if r_cand not in self.register_lst and r_cand!=self.add_sub_register: reg=r_cand;self.stack_register=r_cand;break
+        if reg: index=self.content.index(element);self.content.insert(index,[f'pop {reg}']);self.content.insert(index,[f'push {reg}'])
+    def stack_nop_adder(self,element):
+        reg=self.stack_register
+        if not reg:
+            for r_cand in self.all_registers_lst:
+                if r_cand not in self.register_lst and r_cand!=self.add_sub_register: reg=r_cand;self.stack_register=r_cand;break
+        if reg: index=self.content.index(element);self.content.insert(index,[f'pop {reg}']);self.content.insert(index,['nop']);self.content.insert(index,[f'push {reg}'])
+    def swap_of_reg(self,element):
+        if len(element[0])>16:return;l_reg,f_reg="", "";length=len(element[0])-1
+        while element[0][length]!=',':l_reg+=element[0][length];length-=1
+        length-=1
+        while length>=0 and element[0][length] not in [' ','\t']:f_reg+=element[0][length];length-=1
+        l_reg=l_reg.strip()[::-1]; f_reg=f_reg.strip()[::-1]
+        if f_reg.isdecimal() or l_reg.isdecimal() or not f_reg or not l_reg:return
+        self.content[self.content.index(element)]=[f"cmp {l_reg}, {f_reg}"]
+    def commands_transformer(self):
+        for i in range(len(self.mov_xor_jmp_je_jk_lst)): # This might have issues if list is modified during iteration; use copy if so.
+            item_to_transform = self.mov_xor_jmp_je_jk_lst[i]
+            if item_to_transform not in self.content: continue # If already modified/removed
+            idx=self.content.index(item_to_transform); choice=random.choice([1,2,3,4])
+            if choice==1:self.nope_adder(self.content[idx])
+            elif choice==2:self.add_sub_adder(self.content[idx])
+            elif choice==3:self.stack_nop_adder(self.content[idx])
+            else:self.stack_adder(self.content[idx])
+    def add_sub_transformer(self):
+        self.set_border()
+        for item in list(self.add_sub_lst_im): # Iterate over a copy
+            if item not in self.content:continue;idx=self.content.index(item);choice=random.choice([1,2,3])
+            if choice==1:self.nope_adder(self.content[idx])
+            elif choice==2:self.stack_adder(self.content[idx])
+            else:self.division_adder_im(self.content[idx])
+        for item in list(self.add_sub_lst_reg): # Iterate over a copy
+            if item not in self.content:continue;idx=self.content.index(item);choice=random.choice([1,2,3])
+            if choice==1:self.nope_adder(self.content[idx])
+            elif choice==2:self.stack_adder(self.content[idx])
+            else:self.add_sub_adder(self.content[idx])
+    def mul_transform(self): pass
+    def cmp_transform(self):
+        for item in list(self.cmp_lst):
+            if item not in self.content:continue;idx=self.content.index(item);choice=random.choice([1,2,3])
+            if choice==1:self.nope_adder(self.content[idx])
+            elif choice==2:self.stack_adder(self.content[idx])
+            else:self.swap_of_reg(self.content[idx])
+    def polymorph(self):
+        self.reader();self.parser_add_sub();self.parser_mul();self.parser_commands();self.parser_register();self.parser_cmp()
+        self.set_border();self.classification_add_sub();self.commands_transformer();self.add_sub_transformer();self.cmp_transform()
+        final_content="\n".join(line[0] for line in self.content)
+        with open(f"{self.path[:-4]}_pol.asm",'w') as f:f.write(final_content)
+
+# --- Core IME Framework ---
+class MutableEntity:
+    def __init__(self, data: Any): self._data: Any = data; self.properties: Dict[str, Any] = {}
+    @property
+    def data(self) -> Any: return self._data
+    @data.setter
+    def data(self, new_data: Any) -> None: self._data = new_data
+    def __str__(self) -> str:
+        ds=str(self._data); return f"MutableEntity(type={type(self._data).__name__}, data={ds[:100]+'...' if len(ds)>100 else ds})"
+
+class MutationOperator(ABC):
+    @abstractmethod
+    def apply(self, entity: MutableEntity) -> None: pass
+    def can_apply(self, entity: MutableEntity) -> bool: return True
+
+class IntegerPerturbationOperator(MutationOperator):
+    def __init__(self, perturbation_range: tuple[int,int]=(-5,5)):
+        super().__init__()
+        if not (isinstance(pr:=perturbation_range,tuple) and len(pr)==2 and all(isinstance(x,int) for x in pr) and pr[0]<=pr[1]):
+            raise ValueError("perturbation_range must be tuple of two ints (min,max).")
+        self.min_p,self.max_p = pr
+    def can_apply(self, entity:MutableEntity)->bool: return isinstance(entity.data,int)
+    def apply(self, entity:MutableEntity)->None:
+        if not self.can_apply(entity):return
+        p=random.randint(self.min_p,self.max_p)
+        while p==0 and (self.min_p!=0 or self.max_p!=0): p=random.randint(self.min_p,self.max_p)
+        if isinstance(entity.data,(int,float)): entity.data+=p
+
+class StringReplaceOperator(MutationOperator):
+    def can_apply(self, entity: MutableEntity) -> bool: return isinstance(entity.data, str) and len(entity.data) > 0
+    def apply(self, entity: MutableEntity) -> None:
+        if not self.can_apply(entity): return
+        s_list = list(entity.data)
+        if not s_list: return
+        idx = random.randrange(len(s_list))
+        original_char = s_list[idx]
+        new_char = chr(random.randint(32, 126)) # ASCII printable
+        counter = 0
+        while new_char == original_char and counter < 100:
+            if len(set(s_list)) == 1: break
+            new_char = chr(random.randint(32, 126))
+            counter += 1
+        s_list[idx] = new_char
+        entity.data = "".join(s_list)
+
+class ListElementSwapOperator(MutationOperator):
+    def can_apply(self,entity:MutableEntity)->bool:return isinstance(entity.data,list) and len(entity.data)>=2
+    def apply(self,entity:MutableEntity)->None:
+        if not self.can_apply(entity):
+            return
+        lst = entity.data # Ensure lst is assigned after the guard
+        idx1, idx2 = random.sample(range(len(lst)), 2)
+        lst[idx1], lst[idx2] = lst[idx2], lst[idx1]
+
+class MutationEngine: # Basic engine
+    def __init__(self,operators:List[MutationOperator],mutation_probability:float=1.0):
+        if not operators or not all(isinstance(op,MutationOperator) for op in operators):raise ValueError("Need list of MutationOperator.")
+        if not (0.0<=mutation_probability<=1.0):raise ValueError("Prob must be [0,1].")
+        self.operators=operators;self.mutation_probability=mutation_probability
+    def evaluate_entity(self,entity:MutableEntity)->float:return 0.0
+    def mutate_once(self,entity:MutableEntity)->bool:
+        if random.random()>=self.mutation_probability:return False
+        app_ops=[op for op in self.operators if op.can_apply(entity)]
+        if not app_ops:return False
+        random.choice(app_ops).apply(entity);return True
+    def run(self,entity:MutableEntity,num_mutations:int)->int:
+        if num_mutations<0:raise ValueError("Num mutations non-negative.");succ=0
+        for _ in range(num_mutations):
+            if self.mutate_once(entity):succ+=1
+        return succ
+
+# --- Architectural Graph Representation ---
+class ArchitecturalNode:
+    def __init__(self, node_id:Optional[str]=None, node_type:str="generic", properties:Optional[Dict[str,Any]]=None):
+        self.id=node_id if node_id is not None else str(uuid.uuid4()); self.node_type=node_type
+        self.properties=properties if properties is not None else {}
+    def __str__(self): return f"Node(id={self.id}, type={self.node_type}, props={self.properties})"
+class ArchitecturalEdge:
+    def __init__(self, source_node_id:str, target_node_id:str, edge_id:Optional[str]=None, weight:float=0.0, properties:Optional[Dict[str,Any]]=None): # Renamed args
+        self.id=edge_id if edge_id is not None else str(uuid.uuid4())
+        if not source_node_id or not target_node_id: raise ValueError("Src/tgt node IDs needed.")
+        self.source_node_id=source_node_id; self.target_node_id=target_node_id; self.weight=weight # Renamed args
+        self.properties=properties if properties is not None else {}
+    def __str__(self): return f"Edge(id={self.id}, from={self.source_node_id}, to={self.target_node_id}, w={self.weight}, props={self.properties})"
+class PartitionSchema:
+    def __init__(self, name:str, target_element_type:str, partitions:List[set[str]], schema_id:Optional[str]=None, metadata:Optional[Dict[str,Any]]=None): # Renamed args
+        self.id=schema_id if schema_id is not None else str(uuid.uuid4()); self.name=name # Renamed args
+        self.target_element_type=target_element_type; self.partitions=partitions
+        self.metadata=metadata if metadata is not None else {}
+    def __str__(self): return f"PSchema(id={self.id},'{self.name}',type='{self.target_element_type}',parts={len(self.partitions)})" # Shorter str
+class NetworkGraph:
+    def __init__(self, graph_id:Optional[str]=None, properties:Optional[Dict[str,Any]]=None):
+        self.id=graph_id if graph_id is not None else str(uuid.uuid4()); self.nodes:Dict[str,ArchitecturalNode]={}
+        self.edges:Dict[str,ArchitecturalEdge]={}; self.adj:Dict[str,Dict[str,List[str]]]={}
+        self.properties=properties if properties is not None else {}; self.partition_schemas:List[PartitionSchema]=[]
+    def add_node(self,n:ArchitecturalNode):
+        if n.id in self.nodes:raise ValueError(f"Node ID {n.id} exists.");self.nodes[n.id]=n;self.adj[n.id]={'in':[],'out':[]}
+    def remove_node(self,nid:str):
+        if nid not in self.nodes:return
+        for eid in list(self.edges.keys()):
+            e=self.edges[eid]
+            if e.source_node_id==nid or e.target_node_id==nid: self.remove_edge(eid)
+        if nid in self.nodes:del self.nodes[nid]
+        if nid in self.adj:del self.adj[nid]
+    def add_edge(self,e:ArchitecturalEdge):
+        if e.id in self.edges:raise ValueError(f"Edge ID {e.id} exists.")
+        if e.source_node_id not in self.nodes:raise ValueError(f"Src node {e.source_node_id} missing.")
+        if e.target_node_id not in self.nodes:raise ValueError(f"Tgt node {e.target_node_id} missing.")
+        self.edges[e.id]=e; self.adj[e.source_node_id]['out'].append(e.id); self.adj[e.target_node_id]['in'].append(e.id)
+    def remove_edge(self,eid:str):
+        if eid not in self.edges:return; e=self.edges[eid]
+        if e.source_node_id in self.adj and eid in self.adj[e.source_node_id]['out']: self.adj[e.source_node_id]['out'].remove(eid)
+        if e.target_node_id in self.adj and eid in self.adj[e.target_node_id]['in']: self.adj[e.target_node_id]['in'].remove(eid)
+        if eid in self.edges:del self.edges[eid]
+    def get_node(self,nid:str)->Optional[ArchitecturalNode]:return self.nodes.get(nid)
+    def get_edge(self,eid:str)->Optional[ArchitecturalEdge]:return self.edges.get(eid)
+    def get_incoming_edges(self,nid:str)->List[ArchitecturalEdge]: return [self.edges[eid] for eid in self.adj.get(nid,{}).get('in',[]) if eid in self.edges]
+    def get_outgoing_edges(self,nid:str)->List[ArchitecturalEdge]: return [self.edges[eid] for eid in self.adj.get(nid,{}).get('out',[]) if eid in self.edges]
+    def add_partition_schema(self,s:PartitionSchema):self.partition_schemas.append(s)
+    def __str__(self): return f"NetGraph(id={self.id},n={len(self.nodes)},e={len(self.edges)},p={len(self.partition_schemas)})"
+
+# --- SRO & FMO Stubs (Further Simplified) ---
+class RepartitionGraphOperator(MutationOperator):
+    def __init__(self, **kwargs): super().__init__()
+    def can_apply(self, entity:MutableEntity)->bool:return isinstance(entity.data,NetworkGraph) and len(entity.data.nodes)>0
+    def apply(self, entity:MutableEntity): pass # print(f"SRO Repartition Applied to {entity.data.id if hasattr(entity.data,'id') else 'N/A'}")
+class PartitionBasedRewireOperator(MutationOperator):
+    def __init__(self, **kwargs): super().__init__()
+    def can_apply(self, entity:MutableEntity)->bool:return isinstance(entity.data,NetworkGraph) and entity.data.partition_schemas
+    def apply(self, entity:MutableEntity): pass # print(f"SRO Rewire Applied to {entity.data.id if hasattr(entity.data,'id') else 'N/A'}")
+class HierarchicalNoiseInjectionFMO(MutationOperator):
+    def __init__(self, **kwargs): super().__init__()
+    def can_apply(self, entity:MutableEntity)->bool:return isinstance(entity.data,NetworkGraph)
+    def apply(self, entity:MutableEntity): pass # print(f"FMO Noise Applied to {entity.data.id if hasattr(entity.data,'id') else 'N/A'}")
+class SelfSimilarGrowthFMO(MutationOperator):
+    def __init__(self, **kwargs): super().__init__()
+    def can_apply(self, entity:MutableEntity)->bool:return isinstance(entity.data,NetworkGraph) and len(entity.data.nodes)>0
+    def apply(self, entity:MutableEntity): pass # print(f"FMO Growth Applied to {entity.data.id if hasattr(entity.data,'id') else 'N/A'}")
+
+# --- Smart Mutation Engine ---
 class SmartMutationEngine:
-    """
-    A mutation engine that uses a ReprogrammableSelectorNN to choose operators.
-    """
-    def __init__(self,
-                 operators: list[MutationOperator],
-                 nn_selector: ReprogrammableSelectorNN,
-                 feature_config: dict = None,
-                 fallback_to_random: bool = True,
-                 mutation_probability: float = 1.0):
+    def __init__(self, operators:List[MutationOperator], nn_selector:ReprogrammableSelectorNN,
+                 feature_config:Optional[Dict[str,Any]]=None, replay_buffer_capacity:int=10000,
+                 rl_batch_size:int=32, train_frequency:int=4, fallback_to_random:bool=True,
+                 mutation_probability:float=1.0, max_steps_per_episode:int=200):
+        if not operators: raise ValueError("Need operators.")
+        if ReprogrammableSelectorNN is not type(None) and not isinstance(nn_selector,ReprogrammableSelectorNN): raise ValueError("Bad nn_selector.")
+        if feature_extractors is None: raise ImportError("feature_extractors module failed for SmartMutationEngine.")
+        self.feature_config = feature_config if feature_config is not None else DEFAULT_FEATURE_CONFIG_FROM_MODULE # Use the imported one
+        if not (self.feature_config and "entity_type_dispatch" in self.feature_config and \
+                "extractor_functions_map" in self.feature_config and "max_vector_size" in self.feature_config):
+            raise ValueError("Invalid feature_config.")
+        self.operators=operators
+        self.operator_to_index={op:i for i,op in enumerate(operators)}
+        self.index_to_operator={i:op for i,op in enumerate(operators)}
+        self.nn_selector=nn_selector; self.fallback_to_random=fallback_to_random
+        if not (0.0<=mutation_probability<=1.0): raise ValueError("Prob must be [0,1].")
+        self.mutation_probability=mutation_probability
+        if ReprogrammableSelectorNN is not type(None) and hasattr(self.nn_selector, 'get_config'):
+            nn_out_size = self.nn_selector.get_config().get("output_size")
+            if nn_out_size != len(self.operators): print(f"Warn: NN output ({nn_out_size}) != op count ({len(self.operators)}).")
+        if ExperienceReplayBuffer is type(None): raise ImportError("ExperienceReplayBuffer missing.")
+        self.replay_buffer=ExperienceReplayBuffer(replay_buffer_capacity)
+        self.rl_batch_size=rl_batch_size; self.train_frequency=train_frequency
+        self.mutation_steps_count=0; self.current_episode_step_count=0; self.max_steps_per_episode=max_steps_per_episode
 
-        if not operators:
-            raise ValueError("SmartMutationEngine requires at least one MutationOperator.")
-        if not isinstance(nn_selector, ReprogrammableSelectorNN):
-            raise ValueError("nn_selector must be an instance of ReprogrammableSelectorNN.")
+    def _get_rl_state_representation(self, entity:MutableEntity)->Optional[Any]:
+        features_list=self._extract_features(entity)
+        if features_list is None: return None
+        if ReprogrammableSelectorNN is not type(None) and hasattr(self.nn_selector, 'model_type') and self.nn_selector.model_type=="gnn":
+            if NetworkGraph is not type(None) and isinstance(entity.data,NetworkGraph) and \
+               feature_extractors is not None and hasattr(feature_extractors,'network_graph_to_pyg_data'):
+                if not PYG_AVAILABLE or PyGData is type(None) or PyGData.__name__=='PyGData':
+                    return torch.tensor([features_list],dtype=torch.float32) if 'torch' in globals() and torch is not None else features_list
+                pyg_d = feature_extractors.network_graph_to_pyg_data(entity.data)
+                return pyg_d if pyg_d is not None else (torch.tensor([features_list],dtype=torch.float32) if 'torch' in globals() and torch is not None else features_list)
+            else: return torch.tensor([features_list],dtype=torch.float32) if 'torch' in globals() and torch is not None else features_list
+        else: return torch.tensor([features_list],dtype=torch.float32) if 'torch' in globals() and torch is not None else features_list
 
-        self.feature_config = feature_config if feature_config is not None else feature_extractors.DEFAULT_FEATURE_CONFIG
-        if not self.feature_config or "entity_type_dispatch" not in self.feature_config or \
-           "extractor_functions_map" not in self.feature_config or "max_vector_size" not in self.feature_config:
-            raise ValueError("Invalid feature_config provided or defaulted incorrectly from feature_extractors module.")
+    def _extract_features(self, entity:MutableEntity)->Optional[List[float]]:
+        et_name=type(entity.data).__name__
+        if et_name == 'Module': et_name = "Module"
+        disp_info=self.feature_config["entity_type_dispatch"].get(et_name)
+        if not disp_info: return None
+        ext_fn_name=disp_info["extractor_function_name"]
+        if feature_extractors is None: return None
+        ext_fn = self.feature_config["extractor_functions_map"].get(ext_fn_name) # CORRECTED ACCESS
+        if not ext_fn: return None
+        try:raw_f=ext_fn(entity.data)
+        except Exception as e:print(f"Err in extract {ext_fn_name}:{e}");return None
+        if not isinstance(raw_f,list):return None
+        m_size=self.feature_config["max_vector_size"]
+        return (raw_f+[0.0]*(m_size-len(raw_f))) if len(raw_f)<m_size else raw_f[:m_size]
 
-        self.operators = operators
-        self.nn_selector = nn_selector
-        self.fallback_to_random = fallback_to_random
-        if not (0.0 <= mutation_probability <= 1.0):
-            raise ValueError("Mutation probability must be between 0.0 and 1.0.")
-        self.mutation_probability = mutation_probability
-
-        nn_config_output_size = self.nn_selector.get_config().get("output_size")
-        if nn_config_output_size != len(self.operators):
-            print(f"Warning (SmartMutationEngine init): NN output size ({nn_config_output_size}) "
-                  f"does not match number of operators ({len(self.operators)}). "
-                  "This will likely cause errors during operator selection based on NN output indices.")
-
-
-    def _extract_features(self, entity: MutableEntity) -> list[float] | None:
-        entity_data_type_name = type(entity.data).__name__
-        # The key in DEFAULT_FEATURE_CONFIG for ast.Module is "Module".
-        # No re-mapping of entity_data_type_name is needed here if config is consistent.
-
-        dispatch_info = self.feature_config["entity_type_dispatch"].get(entity_data_type_name)
-        if not dispatch_info:
-            # print(f"Warning (SmartMutationEngine): No feature extractor registered for entity data type '{entity_data_type_name}'.")
-            return None
-
-        extractor_func_name = dispatch_info["extractor_function_name"]
-        extractor_func = self.feature_config["extractor_functions_map"].get(extractor_func_name)
-
-
-        if not extractor_func:
-            # print(f"Warning (SmartMutationEngine): Extractor function '{extractor_func_name}' not found in map for type '{entity_data_type_name}'.")
-            return None
-
-        try:
-            raw_features = extractor_func(entity.data)
-        except Exception as e:
-            print(f"Error during feature extraction with {extractor_func_name} for {entity_data_type_name}: {e}")
-            return None
-
-        # Ensure raw_features is a list before padding/truncating
-        if not isinstance(raw_features, list):
-            print(f"Warning (SmartMutationEngine): Extractor '{extractor_func_name}' did not return a list. Got {type(raw_features)}.")
-            return None
-
-        max_size = self.feature_config["max_vector_size"]
-        if len(raw_features) < max_size:
-            padded_features = raw_features + [0.0] * (max_size - len(raw_features))
-        else:
-            padded_features = raw_features[:max_size]
-
-        return padded_features
-
-    def select_operator_intelligently(self, entity: MutableEntity) -> MutationOperator | None:
-        features = self._extract_features(entity)
-        selected_operator = None
-
-        if features:
+    def select_operator_intelligently(self, entity:MutableEntity, current_state_repr:Any)->Optional[MutationOperator]:
+        sel_op=None
+        if current_state_repr is not None and ReprogrammableSelectorNN is not type(None) and hasattr(self.nn_selector, 'predict'):
             try:
-                operator_scores_tensor = self.nn_selector.predict(features)
-                operator_scores = operator_scores_tensor[0].tolist()
-
-                if len(operator_scores) != len(self.operators):
-                    print(f"Error (SmartMutationEngine): NN output size ({len(operator_scores)}) "
-                          f"FATALLY mismatches operator count ({len(self.operators)}). Cannot map scores to operators.")
+                scores_t=self.nn_selector.predict(current_state_repr);op_scores=scores_t[0].tolist()
+                if len(op_scores)!=len(self.operators):print(f"Err: NN out({len(op_scores)})!=op_cnt({len(self.operators)}).")
                 else:
-                    op_scores_indices = []
-                    for i, op in enumerate(self.operators):
-                        op_scores_indices.append({'operator': op, 'score': operator_scores[i], 'original_index': i})
+                    ops_s=[{'op':op,'score':op_scores[i],'idx':i} for i,op in enumerate(self.operators)]
+                    app_ops=[item for item in ops_s if item['op'].can_apply(entity)]
+                    if app_ops:app_ops.sort(key=lambda x:x['score'],reverse=True);sel_op=app_ops[0]['op']
+            except Exception as e:print(f"Err NN predict/select:{e}")
+        if sel_op is None and self.fallback_to_random:
+            fall_ops=[op for op in self.operators if op.can_apply(entity)]
+            if fall_ops:sel_op=random.choice(fall_ops)
+        return sel_op
 
-                    applicable_ops_with_scores = [item for item in op_scores_indices if item['operator'].can_apply(entity)]
+    def evaluate_entity(self, entity:MutableEntity)->float:
+        data = entity.data
+        if isinstance(data, list):
+            if not data: # Empty list
+                return 1.0
 
-                    if applicable_ops_with_scores:
-                        applicable_ops_with_scores.sort(key=lambda x: x['score'], reverse=True)
-                        selected_operator = applicable_ops_with_scores[0]['operator']
+            numeric_data = [x for x in data if isinstance(x, (int, float))] # Define numeric_data here
 
-            except Exception as e:
-                print(f"Error during NN prediction or intelligent operator selection: {e}")
+            if len(numeric_data) != len(data): # Check if all items were numeric
+                return 0.0  # Penalize mixed/non-numeric for sorting task
 
-        if selected_operator is None and self.fallback_to_random:
-            applicable_operators = [op for op in self.operators if op.can_apply(entity)]
-            if applicable_operators:
-                selected_operator = random.choice(applicable_operators)
+            if len(numeric_data) <= 1: # Single numeric element or empty after filtering
+                return 1.0 # Considered sorted
 
-        return selected_operator
+            # Now numeric_data is guaranteed to have at least 2 elements
+            inversions = 0
+            for i in range(len(numeric_data) - 1):
+                if numeric_data[i] > numeric_data[i+1]:
+                    inversions += 1
+            return 1.0 / (1.0 + float(inversions))
+        return 0.0
 
-    def mutate_once(self, entity: MutableEntity) -> bool:
-        if random.random() >= self.mutation_probability:
-            return False
+    def calculate_reward(self,old_s:float,new_s:float)->float:
+        rew = new_s-old_s
+        if new_s==1.0 and old_s < 1.0: rew+=1.0
+        return rew
 
-        operator_to_apply = self.select_operator_intelligently(entity)
-
-        if operator_to_apply:
-            operator_to_apply.apply(entity)
-
-            # Conceptual: provide feedback to the NN for learning
-            # current_features = self._extract_features(entity)
-            # if current_features and hasattr(self.nn_selector, 'train_step'):
-            #    chosen_op_index = -1
-            #    try:
-            #        chosen_op_index = self.operators.index(operator_to_apply)
-            #    except ValueError:
-            #        pass
-            #    if chosen_op_index != -1 and 'torch' in globals():
-            #        reward = 0.0
-            #        # self.nn_selector.train_step(torch.tensor([current_features], dtype=torch.float32), chosen_op_index)
+    def mutate_once(self, entity:MutableEntity)->bool:
+        if random.random()>=self.mutation_probability:return False
+        self.current_episode_step_count+=1;self.mutation_steps_count+=1
+        state_r=self._get_rl_state_representation(entity);score_curr=self.evaluate_entity(entity)
+        op_to_apply=self.select_operator_intelligently(entity,state_r)
+        if op_to_apply:
+            act_idx = self.operator_to_index.get(op_to_apply)
+            if act_idx is None: return False
+            state_for_buffer=copy.deepcopy(state_r) if not isinstance(state_r,torch.Tensor if 'torch' in globals() and torch is not None else type(None)) else state_r.clone() if 'torch' in globals() and torch is not None and isinstance(state_r, torch.Tensor) else state_r
+            op_to_apply.apply(entity);score_new=self.evaluate_entity(entity)
+            rew=self.calculate_reward(score_curr,score_new)
+            next_s_r=self._get_rl_state_representation(entity)
+            done=(score_new==1.0)or(self.current_episode_step_count>=self.max_steps_per_episode)
+            if state_for_buffer is not None and ExperienceReplayBuffer is not type(None) and self.replay_buffer is not None:
+                self.replay_buffer.push(state_for_buffer,act_idx,rew,next_s_r,done)
+            if self.mutation_steps_count%self.train_frequency==0 and ExperienceReplayBuffer is not type(None) and \
+               self.replay_buffer is not None and len(self.replay_buffer)>=self.rl_batch_size and \
+               ReprogrammableSelectorNN is not type(None) and hasattr(self.nn_selector,'train_on_batch'):
+                exps=self.replay_buffer.sample(self.rl_batch_size)
+                if exps:self.nn_selector.train_on_batch(exps)
+            if done:self.current_episode_step_count=0
             return True
         return False
 
-    def run(self, entity: MutableEntity, num_mutations: int) -> int:
-        if num_mutations < 0: raise ValueError("Number of mutations cannot be negative.")
-
-        successful_mutations = 0
-        for _ in range(num_mutations):
-            if self.mutate_once(entity):
-                successful_mutations += 1
-        return successful_mutations
+    def run(self, entity:MutableEntity, num_muts:int)->int:
+        if num_muts<0:raise ValueError("Num muts non-negative.");succ_muts=0
+        for _ in range(num_muts):
+            if self.mutate_once(entity):succ_muts+=1
+        return succ_muts
