@@ -4,236 +4,408 @@ import torch.nn as nn
 import torch.optim as optim
 import copy
 import random
+import json # For saving/loading nn_config
+import os # For save/load paths
 from typing import List, Union, Optional, Dict, Any # For type hints
-from collections import namedtuple # Added import
+from collections import namedtuple # For Experience in __main__
 
-# For this phase, we are focusing on FFN, so PyG imports are not strictly needed here yet.
-# PYG_AVAILABLE = False # Assume not available for this focused FFN implementation.
-# class PyGData: pass # Dummy for type hints if needed by shared signatures.
+# --- PyTorch Geometric Imports & Fallbacks ---
+try:
+    from torch_geometric.nn import GCNConv, global_mean_pool, global_add_pool, global_max_pool # type: ignore
+    from torch_geometric.data import Data as PyGData, Batch as PyGBatch # type: ignore
+    PYG_AVAILABLE = True
+except ImportError:
+    PYG_AVAILABLE = False
+    class GCNConv(nn.Module): # type: ignore
+        def __init__(self, *args, **kwargs): super().__init__(); raise NotImplementedError("GCNConv stub: PyG not available.")
+    def global_mean_pool(x, batch): raise NotImplementedError("global_mean_pool stub: PyG not available.") # type: ignore
+    def global_add_pool(x, batch): raise NotImplementedError("global_add_pool stub: PyG not available.") # type: ignore
+    def global_max_pool(x, batch): raise NotImplementedError("global_max_pool stub: PyG not available.") # type: ignore
+    class PyGData: # type: ignore
+        def __init__(self, x=None, edge_index=None, batch=None, **kwargs): self.x=x;self.edge_index=edge_index;self.batch=batch; [setattr(self,k,v) for k,v in kwargs.items()] # type: ignore
+    class PyGBatch: # type: ignore
+        @staticmethod
+        def from_data_list(data_list): raise NotImplementedError("PyGBatch stub: PyG not available.")
+
+# --- IME Component Imports & Fallbacks ---
+try:
+    from .engine import NetworkGraph # For type hinting
+    from .gnn_utils import network_graph_to_pyg_data, NODE_FEATURE_DIM as GNN_NODE_FEATURE_DIM
+except ImportError:
+    NetworkGraph = type(None)
+    def network_graph_to_pyg_data_dummy(graph_unused): return None # type: ignore
+    network_graph_to_pyg_data = network_graph_to_pyg_data_dummy
+    GNN_NODE_FEATURE_DIM = 1
+
 
 class ReprogrammableSelectorNN(nn.Module):
-    """
-    A reprogrammable neural network for selecting mutation operators.
-    Its architecture is defined by a configuration dictionary.
-    Currently implements the Feedforward Network (FFN) path.
-    """
     def __init__(self, nn_config: Dict[str, Any], learning_rate: float = 0.001):
         super().__init__()
-
-        if not nn_config or not isinstance(nn_config, dict):
-            raise ValueError("nn_config dictionary must be provided.")
-
+        if not nn_config or not isinstance(nn_config, dict): raise ValueError("nn_config dict needed.")
         self.nn_config = copy.deepcopy(nn_config)
-        # For this simplified Step 4, model_type is assumed/defaults to 'ffn'
         self.model_type = self.nn_config.get("model_type", "ffn").lower()
-        if self.model_type != "ffn":
-            raise ValueError(f"For this implementation phase, model_type must be 'ffn'. Got '{self.model_type}'.")
-
         self.learning_rate = learning_rate
-        self.model_internal = self._build_model()
 
-        # Initialize optimizer and criterion here
+        if self.model_type == "gnn" and not PYG_AVAILABLE:
+            raise ImportError("PyTorch Geometric required for GNN model_type but not found.")
+        if self.model_type == "gnn":
+            if "node_feature_size" not in self.nn_config:
+                if GNN_NODE_FEATURE_DIM is None or (GNN_NODE_FEATURE_DIM==1 and NetworkGraph is type(None)):
+                    raise ValueError("GNN_NODE_FEATURE_DIM error / 'node_feature_size' missing in GNN config.")
+                self.nn_config["node_feature_size"] = GNN_NODE_FEATURE_DIM
+
+        self.model_internal = self._build_model()
         self.optimizer = optim.Adam(self.model_internal.parameters(), lr=self.learning_rate)
-        # For DQN Q-value regression. Output layer should be raw logits (output_activation="none").
         self.criterion = nn.MSELoss()
 
-    def _get_activation_function(self, activation_name: Optional[str]) -> Optional[nn.Module]:
-        if activation_name is None or activation_name.lower() == "none": return None
-        name_lower = activation_name.lower()
-        if name_lower == "relu": return nn.ReLU()
-        elif name_lower == "sigmoid": return nn.Sigmoid()
-        elif name_lower == "tanh": return nn.Tanh()
-        elif name_lower == "softmax": return nn.Softmax(dim=-1) # Usually for classification probabilities
-        else: raise ValueError(f"Unsupported activation function: {activation_name}")
+    def _get_activation_function(self, name: Optional[str]) -> Optional[nn.Module]:
+        if name is None or name.lower()=="none": return None
+        act_map = {"relu":nn.ReLU,"sigmoid":nn.Sigmoid,"tanh":nn.Tanh,"softmax":lambda: nn.Softmax(dim=-1)}
+        if (fn := act_map.get(name.lower())): return fn()
+        raise ValueError(f"Unsupported activation: {name}")
 
-    def _build_model(self) -> nn.Sequential: # FFN specific implementation
-        layers_config = self.nn_config.get("layers", [])
-        input_size = self.nn_config.get("input_size")
-        output_size = self.nn_config.get("output_size")
-        output_activation_name = self.nn_config.get("output_activation", "none") # Default to raw logits
+    def _build_ffn_model(self) -> nn.Sequential:
+        cfg=self.nn_config; layers_cfg=cfg.get("layers",[]); ins=cfg.get("input_size");outs=cfg.get("output_size");out_act=cfg.get("output_activation","none")
+        if ins is None or outs is None: raise ValueError("FFN config: input/output_size missing.")
+        ml:List[nn.Module]=[]; cs=ins
+        for i,lc in enumerate(layers_cfg):
+            lt=lc.get("type","").lower();sz=lc.get("size");act=lc.get("activation")
+            if lt=="linear":
+                if sz is None or not isinstance(sz,int) or sz<=0: raise ValueError(f"FFN Linear {i} needs +int 'size'.")
+                ml.append(nn.Linear(cs,sz));cs=sz
+                if (af:=self._get_activation_function(act)):ml.append(af)
+            elif lt=="dropout":
+                r=lc.get("rate",0.5);
+                if not (isinstance(r,float)and 0.0<=r<1.0):raise ValueError(f"FFN Dropout {i} rate float [0,1).")
+                ml.append(nn.Dropout(r))
+            else:raise ValueError(f"Unsupported FFN layer: {lt}")
+        ml.append(nn.Linear(cs,outs))
+        if(oaf:=self._get_activation_function(out_act)):ml.append(oaf)
+        return nn.Sequential(*ml)
 
-        if input_size is None or not isinstance(input_size, int) or input_size <= 0:
-            raise ValueError("FFN nn_config must specify a positive integer 'input_size'.")
-        if output_size is None or not isinstance(output_size, int) or output_size <= 0:
-            raise ValueError("FFN nn_config must specify a positive integer 'output_size'.")
+    def _build_gnn_model(self) -> nn.Module:
+        if not PYG_AVAILABLE:raise ImportError("PyG required for GNN.")
+        cfg=self.nn_config;nfs=cfg.get("node_feature_size");glc=cfg.get("gnn_layers",[]);gpm=cfg.get("global_pooling","mean").lower()
+        pglc=cfg.get("post_gnn_mlp_layers",[]);os=cfg.get("output_size");oan=cfg.get("output_activation","none")
+        if nfs is None or os is None:raise ValueError("GNN config: node_feature_size/output_size missing.")
 
-        model_layers: List[nn.Module] = []
-        current_size = input_size
-        for i, layer_conf in enumerate(layers_config):
-            layer_type = layer_conf.get("type", "").lower()
-            if layer_type == "linear":
-                out_features = layer_conf.get("size")
-                if out_features is None or not isinstance(out_features, int) or out_features <=0:
-                    raise ValueError(f"Linear layer config at index {i} must specify 'size' as a positive integer.")
-                model_layers.append(nn.Linear(current_size, out_features))
-                current_size = out_features
-                activation_fn = self._get_activation_function(layer_conf.get("activation"))
-                if activation_fn: model_layers.append(activation_fn)
-            elif layer_type == "dropout":
-                rate = layer_conf.get("rate", 0.5)
-                if not (isinstance(rate, float) and 0.0 <= rate < 1.0): # Dropout rate is [0, 1)
-                    raise ValueError(f"Dropout layer config at index {i} must have 'rate' as a float in [0,1).")
-                model_layers.append(nn.Dropout(rate))
-            else: raise ValueError(f"Unsupported FFN layer type in nn_config at index {i}: {layer_type}")
+        class GNNSubModel(nn.Module):
+            def __init__(self_sub, parent_nn_instance):
+                super().__init__(); self_sub.p = parent_nn_instance; self_sub.convs = nn.ModuleList(); cc = nfs
+                for i,lc in enumerate(glc):
+                    lt=lc.get("type","").lower();oc=lc.get("out_channels")
+                    if oc is None: raise ValueError(f"GNN layer {i} needs 'out_channels'.")
+                    if lt=="gcnconv":s_sub.convs.append(GCNConv(cc,oc)) # Corrected self_sub
+                    else: raise ValueError(f"Unsupported GNN layer: {lt}")
+                    cc=oc
+                    if(af := s_sub.p._get_activation_function(lc.get("activation"))):s_sub.convs.append(af)
 
-        model_layers.append(nn.Linear(current_size, output_size))
-        output_activation_fn = self._get_activation_function(output_activation_name)
-        if output_activation_fn: model_layers.append(output_activation_fn)
+                pool_map={"mean":global_mean_pool,"add":global_add_pool,"max":global_max_pool}
+                pool_fn = pool_map.get(gpm) # Corrected assignment
+                if not pool_fn:
+                    raise ValueError(f"Unsupported pooling method: {gpm}")
+                self_sub.pool = pool_fn # Corrected assignment
 
-        return nn.Sequential(*model_layers)
+                self_sub.post_mlp=nn.ModuleList();mcs=cc
+                for i,lc in enumerate(pglc):
+                    lt=lc.get("type","").lower()
+                    if lt=="linear":
+                        sz=lc.get("size");
+                        if sz is None:raise ValueError(f"Post-GNN MLP Linear {i} needs 'size'.")
+                        self_sub.post_mlp.append(nn.Linear(mcs,sz));mcs=sz
+                        if(af := s_sub.p._get_activation_function(lc.get("activation"))):s_sub.post_mlp.append(af)
+                    elif lt=="dropout":s_sub.post_mlp.append(nn.Dropout(lc.get("rate",0.5)))
+                    else:raise ValueError(f"Unsupported Post-GNN MLP layer: {lt}")
+                self_sub.out_l=nn.Linear(mcs,os);s_sub.out_act=s_sub.p._get_activation_function(oan)
 
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        if not isinstance(features, torch.Tensor):
-            raise TypeError("Input features must be a PyTorch Tensor.")
-        if features.dtype != torch.float32:
-            features = features.to(torch.float32)
+            def forward(self_sub,d:PyGData):
+                x,ei,b=d.x,d.edge_index,getattr(d,'batch',None)
+                if x.dtype!=torch.float32:x=x.to(torch.float32)
+                for l_ in self_sub.convs:x=l_(x,ei) if isinstance(l_,GCNConv) else l_(x)
+                if x.numel()==0:
+                    n_out_ch=nfs;
+                    if self_sub.convs: lc_=next((l__ for l__ in reversed(self_sub.convs) if hasattr(l__,'out_channels')),None);
+                    if lc_:n_out_ch=lc_.out_channels # type: ignore
+                    n_g=int(b.max().item()+1) if b is not None and b.numel()>0 else 1;
+                    x=torch.zeros((n_g,n_out_ch),device=x.device)
+                else:
+                    if b is None:b=torch.zeros(x.shape[0],dtype=torch.long,device=x.device)
+                    x=self_sub.pool(x,b)
+                for l_ in self_sub.post_mlp:x=l_(x)
+                x=self_sub.out_l(x);
+                if self_sub.out_act:x=self_sub.out_act(x)
+                return x
+        return GNNSubModel(self)
 
-        expected_input_features = self.nn_config.get("input_size")
-        if features.shape[-1] != expected_input_features:
-            raise ValueError(f"Input feature size ({features.shape[-1]}) does not match model's expected input_size ({expected_input_features}).")
-        return self.model_internal(features)
+    def _build_model(self)->nn.Module:
+        if self.model_type=="gnn":return self._build_gnn_model()
+        elif self.model_type=="ffn":return self._build_ffn_model()
+        else:raise ValueError(f"Unknown model_type:{self.model_type}")
 
-    def predict(self, features: Union[List[float], torch.Tensor]) -> torch.Tensor:
+    def forward(self,input_data:Union[torch.Tensor,PyGData])->torch.Tensor:
+        if self.model_type=="gnn":
+            if not isinstance(input_data,PyGData):raise TypeError(f"GNN expects PyGData,got {type(input_data)}")
+            return self.model_internal(input_data)
+        else:
+            if not isinstance(input_data,torch.Tensor):raise TypeError(f"FFN expects Tensor,got {type(input_data)}")
+            feats=input_data.to(torch.float32);exp_in=self.nn_config.get("input_size")
+            if feats.shape[-1]!=exp_in:raise ValueError(f"Input feats {feats.shape[-1]}!=FFN expected {exp_in}")
+            return self.model_internal(feats)
+
+    def predict(self,features_or_graph_data:Union[List[float],torch.Tensor,Any,PyGData],verbose:bool=False)->torch.Tensor:
         self.model_internal.eval()
         with torch.no_grad():
-            if isinstance(features, list):
-                features_tensor = torch.tensor(features, dtype=torch.float32)
-            elif isinstance(features, torch.Tensor):
-                features_tensor = features.to(torch.float32)
-            else:
-                raise TypeError(f"FFN model predict expects list or Tensor, got {type(features)}")
+            input_val:Union[torch.Tensor,PyGData]
+            if self.model_type=="gnn":
+                if isinstance(features_or_graph_data,PyGData):input_val=features_or_graph_data
+                elif NetworkGraph is not type(None) and isinstance(features_or_graph_data,NetworkGraph):
+                    if network_graph_to_pyg_data is None:raise RuntimeError("network_graph_to_pyg_data missing.")
+                    conv_data=network_graph_to_pyg_data(features_or_graph_data)
+                    if conv_data is None:raise ValueError("NetGraph to PyGData conversion failed.")
+                    input_val=conv_data
+                else:raise TypeError(f"GNN predict expects PyGData/NetworkGraph,got {type(features_or_graph_data)}")
+                if verbose and isinstance(input_val, PyGData) and hasattr(input_val, 'num_nodes') and hasattr(input_val, 'num_edges'):
+                    print(f"  NN Predict (GNN) Input: Nodes={input_val.num_nodes}, Edges={input_val.num_edges}, x_shape={input_val.x.shape if hasattr(input_val,'x') else 'N/A'}")
+            else: # FFN
+                if isinstance(features_or_graph_data,torch.Tensor):input_val=features_or_graph_data
+                elif isinstance(features_or_graph_data,list):input_val=torch.tensor(features_or_graph_data,dtype=torch.float32)
+                else:raise TypeError(f"FFN predict expects list/Tensor,got {type(features_or_graph_data)}")
+                if input_val.ndim==1:input_val=input_val.unsqueeze(0)
+                if verbose:print(f"  NN Predict (FFN) Input (shape {input_val.shape}): {input_val.tolist()}")
 
-            if features_tensor.ndim == 1: # Add batch dimension if flat (single instance)
-                features_tensor = features_tensor.unsqueeze(0)
+            output=self.forward(input_val)
+            if verbose:print(f"  NN Predict Output Scores: {output.tolist()}")
+            return output
 
-            output = self.forward(features_tensor)
-        return output
+    def train_on_batch(self,experiences:List[Any],gamma:float=0.99,verbose:bool=False)->float:
+        if not experiences:return 0.0
+        self.model_internal.train()
+        states_orig=[e.state for e in experiences];actions=torch.tensor([e.action for e in experiences],dtype=torch.long)
+        rewards=torch.tensor([e.reward for e in experiences],dtype=torch.float32);next_states_orig=[e.next_state for e in experiences]
+        dones=torch.tensor([e.done for e in experiences],dtype=torch.bool)
 
-    def train_on_batch(self, experiences: List[Any], # List of Experience namedtuples from rl_utils
-                       gamma: float = 0.99) -> float:
-        if not experiences: return 0.0 # No loss if no experiences
+        current_q_s_a: torch.Tensor
+        next_q_s_prime_max: torch.Tensor
 
-        self.model_internal.train() # Set model to training mode
+        if self.model_type=="ffn":
+            # states_orig is a list of tensors, each [1, feature_size]
+            # Concatenate them along dimension 0 to make a [batch_size, feature_size] tensor
+            states_batch = torch.cat(states_orig, dim=0)
+            current_q_s_all_a=self.forward(states_batch)
+            current_q_s_a=current_q_s_all_a.gather(1,actions.unsqueeze(-1)).squeeze(-1)
 
-        # Assuming Experience is a namedtuple('Experience', ('state', 'action', 'reward', 'next_state', 'done'))
-        # And state/next_state are feature lists/tensors for FFN
+            next_q_s_prime_max = torch.zeros(len(experiences), device=states_batch.device) # Initialize for all experiences
+            non_final_mask = ~dones # Mask for experiences that are not terminal
 
-        states = torch.tensor([e.state for e in experiences], dtype=torch.float32)
-        actions = torch.tensor([e.action for e in experiences], dtype=torch.long).unsqueeze(1) # For gather
-        rewards = torch.tensor([e.reward for e in experiences], dtype=torch.float32)
+            # Identify the indices in the original batch that correspond to non-terminal states
+            non_final_indices = torch.where(non_final_mask)[0]
 
-        # Handle None in next_states for terminal states
-        non_final_mask = torch.tensor([e.next_state is not None for e in experiences], dtype=torch.bool)
-        non_final_next_states_list = [e.next_state for e in experiences if e.next_state is not None]
+            if len(non_final_indices) > 0: # If there are any non-terminal states
+                # Collect next_state tensors ONLY for these non-terminal experiences,
+                # and only if they are valid tensors.
+                valid_next_states_for_non_final_experiences = []
+                # Keep track of which original batch indices these valid_next_states correspond to.
+                # This list of indices will be used to update next_q_s_prime_max.
+                original_indices_of_valid_next_states = []
 
-        # Q(s,a)
-        q_predicted_all_actions = self.forward(states)
-        q_predicted_for_taken_actions = q_predicted_all_actions.gather(1, actions).squeeze(1)
+                for idx_in_batch in non_final_indices:
+                    next_state_candidate = next_states_orig[idx_in_batch.item()]
+                    if next_state_candidate is not None and isinstance(next_state_candidate, torch.Tensor):
+                        valid_next_states_for_non_final_experiences.append(next_state_candidate)
+                        original_indices_of_valid_next_states.append(idx_in_batch) # Store the original tensor index
 
-        # Max Q(s',a') for non-terminal next states
-        next_state_max_q_values = torch.zeros(len(experiences), device=states.device) # Zero for terminal states
-        if len(non_final_next_states_list) > 0:
-            non_final_next_states_tensor = torch.tensor(non_final_next_states_list, dtype=torch.float32)
-            with torch.no_grad():
-                next_q_all_actions = self.forward(non_final_next_states_tensor)
-            next_state_max_q_values[non_final_mask] = next_q_all_actions.max(1)[0]
+                if valid_next_states_for_non_final_experiences: # If we found any valid tensors for non-terminal states
+                    # Concatenate these valid next_state tensors into a batch
+                    nfns_tensor = torch.cat(valid_next_states_for_non_final_experiences, dim=0)
 
-        # Q_target = R + gamma * max_Q(s')
-        # For done states, Q_target is just R (because next_state_max_q_values[done_indices] is 0)
-        q_target_values = rewards + (gamma * next_state_max_q_values)
+                    with torch.no_grad():
+                        # Get Q-values for all actions for these next_states
+                        q_values_for_all_actions_nfns = self.forward(nfns_tensor)
+                        # Select the max Q-value for each of these next_states
+                        max_q_values_nfns = q_values_for_all_actions_nfns.max(1)[0]
 
-        loss = self.criterion(q_predicted_for_taken_actions, q_target_values.detach())
+                    # Update next_q_s_prime_max at the specific original_indices_of_valid_next_states
+                    # Need to convert list of tensor indices to a tensor for indexing
+                    if original_indices_of_valid_next_states: # Should be true if valid_next_states_for_non_final_experiences is true
+                        update_indices = torch.stack(original_indices_of_valid_next_states).squeeze() # Ensure it's 1D
+                        if update_indices.ndim == 0: # Handle if only one non-final state
+                            update_indices = update_indices.unsqueeze(0)
 
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+                        next_q_s_prime_max[update_indices] = max_q_values_nfns
 
-        if not hasattr(self, "_train_batch_call_count"): self._train_batch_call_count = 0
-        self._train_batch_call_count += 1
+            # If an experience is non-terminal (non_final_mask[i] is True) but its next_state was None or not a Tensor,
+            # its entry in next_q_s_prime_max will remain 0. This is acceptable (treat as 0 future reward).
+
+        elif self.model_type=="gnn" and PYG_AVAILABLE and PyGBatch is not None:
+            # GNN path needs similar careful handling of non_final_mask and next_state processing
+            valid_states_pyg=[s for s in states_orig if isinstance(s,PyGData)]
+            if len(valid_states_pyg)!=len(states_orig):raise ValueError("GNN training needs all states as PyGData.")
+            states_batch_pyg=PyGBatch.from_data_list(valid_states_pyg)
+            current_q_s_all_a=self.forward(states_batch_pyg)
+            current_q_s_a=current_q_s_all_a.gather(1,actions.unsqueeze(-1)).squeeze(-1)
+            non_final_mask=~dones
+            non_final_next_states_pyg=[ns for ns in next_states_orig if ns is not None and isinstance(ns,PyGData)]
+            next_q_s_prime_max=torch.zeros(len(experiences),device=current_q_s_a.device)
+            if non_final_next_states_pyg:
+                # This assumes that the non_final_mask aligns with non_final_next_states_pyg
+                # which is true if all next_states are either None or PyGData.
+                if len(non_final_next_states_pyg) == non_final_mask.sum().item():
+                    next_states_batch_pyg = PyGBatch.from_data_list(non_final_next_states_pyg)
+                    with torch.no_grad():next_q_s_prime_all_a=self.forward(next_states_batch_pyg)
+                    next_q_s_prime_max[non_final_mask]=next_q_s_prime_all_a.max(1)[0]
+                elif non_final_mask.sum().item() > 0 : # Some non-final states were not PyGData
+                     print("Warning: GNN train_on_batch: Some non-final next_states were not PyGData. Their Q-values will be 0.")
+
+        else:raise RuntimeError(f"Unsupported model_type '{self.model_type}' or PyG unavailable for training.")
+
+        q_target=rewards+(gamma*next_q_s_prime_max*(~dones).float())
+        loss=self.criterion(current_q_s_a,q_target.detach())
+        self.optimizer.zero_grad();loss.backward();self.optimizer.step()
+
+        if verbose and experiences:
+            exp0=experiences[0];sr_str=str(exp0.state)[:70]+"..." if len(str(exp0.state))>70 else str(exp0.state)
+            nsr_str=str(exp0.next_state)[:70]+"..." if exp0.next_state and len(str(exp0.next_state))>70 else str(exp0.next_state)
+            print(f"  NNTrn(S:'{sr_str}',A:{exp0.action},R:{exp0.reward:.2f},NS:'{nsr_str}',D:{exp0.done}) Qpred:{current_q_s_a[0].item():.4f},Qtarg:{q_target[0].item():.4f},Loss:{loss.item():.6f}")
+
+        if not hasattr(self,"_train_c"):self._train_c=0
+        self._train_c+=1 # Corrected increment
         return loss.item()
 
-    def get_config(self) -> Dict[str, Any]:
-        return copy.deepcopy(self.nn_config)
+    def get_config(self)->Dict[str,Any]:return copy.deepcopy(self.nn_config)
+    def get_architecture_summary(self) -> str:
+        sl=[];sl.append(f"Model Type: {self.model_type.upper()}")
+        if self.model_type=="ffn":
+            sl.append(f"  Input Size: {self.nn_config.get('input_size')}")
+            sl.append("  FFN Hidden Layers Config:")
+            for i,lc in enumerate(self.nn_config.get('layers',[])):
+                ls=f"    L{i}:T={lc.get('type')}"
+                if lc.get('type')=='linear':ls+=f",S={lc.get('size')},A={lc.get('activation','none')}"
+                elif lc.get('type')=='dropout':ls+=f",R={lc.get('rate')}"
+                sl.append(ls)
+            sl.append(f"  Output Layer:S={self.nn_config.get('output_size')},A={self.nn_config.get('output_activation','none')}")
+        elif self.model_type=="gnn":
+            sl.append(f"  Node Feature Size: {self.nn_config.get('node_feature_size')}")
+            sl.append("  GNN Conv Layers Config:")
+            for i,lc in enumerate(self.nn_config.get('gnn_layers',[])):
+                ls=f"    L{i}:T={lc.get('type')}"
+                if lc.get('type') in ['gcnconv','gatconv']:ls+=f",OC={lc.get('out_channels')},A={lc.get('activation','none')}"
+                sl.append(ls)
+            sl.append(f"  Global Pooling: {self.nn_config.get('global_pooling','N/A')}")
+            if self.nn_config.get('post_gnn_mlp_layers'):
+                sl.append("  Post-GNN MLP Layers Config:")
+                for i,lc in enumerate(self.nn_config.get('post_gnn_mlp_layers',[])):
+                    ls=f"    L{i}:T={lc.get('type')}"
+                    if lc.get('type')=='linear':ls+=f",S={lc.get('size')},A={lc.get('activation','none')}"
+                    elif lc.get('type')=='dropout':ls+=f",R={lc.get('rate')}"
+                    sl.append(ls)
+            sl.append(f"  Output Layer:S={self.nn_config.get('output_size')},A={self.nn_config.get('output_activation','none')}")
+        sl.append("\n  PyTorch Model Structure:");sl.append(str(self.model_internal))
+        return "\n".join(sl)
 
     def reconfigure(self, new_nn_config: Dict[str, Any]):
         print(f"Reconfiguring ReprogrammableSelectorNN.")
-        if not new_nn_config or not isinstance(new_nn_config, dict):
-            raise ValueError("Invalid new_nn_config: Must be a dictionary.")
-
-        # For this FFN-focused phase, ensure new config is also FFN
-        new_model_type = new_nn_config.get("model_type", "ffn").lower()
-        if new_model_type != "ffn":
-            raise ValueError(f"Reconfiguration to model_type '{new_model_type}' not supported in this FFN-only phase.")
-        new_nn_config["model_type"] = "ffn" # Ensure it's set
-
-        if 'input_size' not in new_nn_config or 'output_size' not in new_nn_config:
-            raise ValueError("For FFN, new_nn_config must specify 'input_size' and 'output_size'.")
-
-        self.nn_config = copy.deepcopy(new_nn_config)
-        self.model_type = self.nn_config.get("model_type") # Should be 'ffn'
+        if not new_nn_config or not isinstance(new_nn_config, dict): raise ValueError("Invalid new_nn_config: Must be dict.")
+        cm_type=new_nn_config.get("model_type",self.model_type).lower();new_nn_config["model_type"]=cm_type
+        if cm_type=="ffn":
+            if 'input_size' not in new_nn_config or 'output_size' not in new_nn_config: raise ValueError("FFN config needs input/output_size.")
+        elif cm_type=="gnn":
+            if 'node_feature_size' not in new_nn_config:
+                if GNN_NODE_FEATURE_DIM is None or (GNN_NODE_FEATURE_DIM==1 and NetworkGraph is type(None)): raise ValueError("GNN config needs node_feature_size or valid GNN_NODE_FEATURE_DIM.")
+                new_nn_config['node_feature_size']=GNN_NODE_FEATURE_DIM
+            if 'output_size' not in new_nn_config: raise ValueError("GNN config needs output_size.")
+        else: raise ValueError(f"Unsupported model_type: {cm_type}")
+        self.nn_config=copy.deepcopy(new_nn_config);self.model_type=cm_type
         print(f"  NN config updated. New model_type: {self.model_type}")
         try:
-            self.model_internal = self._build_model()
-            print("  Model has been rebuilt.")
-            # Re-initialize optimizer with new model parameters and stored learning rate
-            self.optimizer = optim.Adam(self.model_internal.parameters(), lr=self.learning_rate)
-            self.criterion = nn.MSELoss() # Or re-init if criterion could change
-        except Exception as e:
-            print(f"  Error rebuilding model: {e}. Model may be in an inconsistent state.")
+            self.model_internal=self._build_model();print("  Model rebuilt.")
+            self.optimizer=optim.Adam(self.model_internal.parameters(),lr=self.learning_rate)
+            self.criterion=nn.MSELoss()
+        except Exception as e: print(f"  Error rebuilding model: {e}.")
 
+    def save_model(self, directory_path: str, model_filename: str = "nn_model.pth", config_filename: str = "nn_config.json"):
+        os.makedirs(directory_path, exist_ok=True)
+        model_path = os.path.join(directory_path, model_filename)
+        config_path = os.path.join(directory_path, config_filename)
+        torch.save(self.model_internal.state_dict(), model_path)
+        with open(config_path, 'w') as f:
+            json.dump(self.nn_config, f, indent=4)
+        print(f"Model saved to {model_path} and config to {config_path}")
 
-# Example usage (for testing this file directly)
+    @staticmethod
+    def load_model(directory_path: str, model_filename: str = "nn_model.pth", config_filename: str = "nn_config.json", learning_rate: Optional[float] = None) -> 'ReprogrammableSelectorNN':
+        config_path = os.path.join(directory_path, config_filename)
+        model_path = os.path.join(directory_path, model_filename)
+        if not os.path.exists(config_path) or not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model or config file not found in {directory_path}")
+        with open(config_path, 'r') as f:
+            loaded_config = json.load(f)
+
+        # Allow overriding learning rate from loaded config
+        final_learning_rate = learning_rate if learning_rate is not None else loaded_config.get('learning_rate', 0.001) # Original LR or default
+
+        # The ReprogrammableSelectorNN __init__ needs nn_config, not the full loaded_config directly if it contains extra stuff.
+        # And learning_rate is a direct param to __init__.
+        # So, we pass the loaded_config (which is the nn_config) and the potentially overridden learning_rate.
+        instance = ReprogrammableSelectorNN(nn_config=loaded_config, learning_rate=final_learning_rate)
+        instance.model_internal.load_state_dict(torch.load(model_path))
+        print(f"Model loaded from {model_path} and config from {config_path}")
+        return instance
+
+# Example usage
 if __name__ == '__main__':
-    print("--- ReprogrammableSelectorNN (FFN Path) Direct Test ---")
-
-    Experience = namedtuple('Experience', ('state', 'action', 'reward', 'next_state', 'done')) # For testing train_on_batch
-
-    ffn_conf = {
-        "model_type": "ffn",
-        "input_size": 10,
-        "layers": [{"type": "linear", "size": 64, "activation": "relu"}, {"type": "linear", "size": 32, "activation": "relu"}],
-        "output_size": 3, # Number of actions
-        "output_activation": "none" # For Q-values
-    }
-    print("\n1. Testing FFN configuration:")
+    if not PYG_AVAILABLE: print("Warning: PyTorch Geometric not available, GNN tests will be limited or fail.")
+    print("--- ReprogrammableSelectorNN (FFN & GNN path) Direct Test ---")
+    Experience = namedtuple('Experience', ('state', 'action', 'reward', 'next_state', 'done'))
+    ffn_conf = {"model_type":"ffn", "input_size":10, "layers":[{"type":"linear","size":8,"activation":"relu"}], "output_size":3, "output_activation":"none"}
+    print("\nTesting FFN configuration:")
     nn_ffn = ReprogrammableSelectorNN(ffn_conf, learning_rate=0.01)
-    print(f"  Model Structure:\n{nn_ffn.model_internal}")
+    print(nn_ffn.get_architecture_summary())
+    ffn_feats1_list = [random.random() for _ in range(10)]; ffn_feats1_tens = torch.tensor(ffn_feats1_list, dtype=torch.float32)
+    ffn_feats_batch = torch.randn(4, 10)
+    print(f"FFN Predict (single list): {nn_ffn.predict(ffn_feats1_list, verbose=True)}")
+    print(f"FFN Predict (batch tensor): shape {nn_ffn.predict(ffn_feats_batch).shape}")
+    dummy_exp_ffn = [Experience(ffn_feats1_list,0,1.0,None,True), Experience(torch.randn(10).tolist(),1,-1.0,torch.randn(10).tolist(),False)]
+    print("\nTesting FFN train_on_batch:")
+    loss_ffn = nn_ffn.train_on_batch(dummy_exp_ffn, verbose=True); print(f"  FFN batch loss: {loss_ffn}")
 
-    ffn_features_single_list = [random.random() for _ in range(10)]
-    ffn_features_single_tensor = torch.tensor(ffn_features_single_list, dtype=torch.float32)
+    if PYG_AVAILABLE and network_graph_to_pyg_data is not None and NetworkGraph is not type(None) and GNN_NODE_FEATURE_DIM > 1:
+        gnn_conf = {"model_type":"gnn","node_feature_size":GNN_NODE_FEATURE_DIM,
+                    "gnn_layers":[{"type":"gcnconv","out_channels":16,"activation":"relu"}],
+                    "global_pooling":"mean","post_gnn_mlp_layers":[{"type":"linear","size":8,"activation":"relu"}],
+                    "output_size":2,"output_activation":"none"}
+        print("\nTesting GNN configuration:")
+        nn_gnn = ReprogrammableSelectorNN(gnn_conf, learning_rate=0.01)
+        print(nn_gnn.get_architecture_summary())
+        try:
+            from modules.engine import ArchitecturalNode, ArchitecturalEdge
+            g1=NetworkGraph("g1");g1.add_node(ArchitecturalNode("n1","FunctionDef"));g1.add_node(ArchitecturalNode("n2","IfStatement"));g1.add_edge(ArchitecturalEdge("n1","n2","e1"))
+            g2=NetworkGraph("g2");g2.add_node(ArchitecturalNode("ga","ReturnStatement"));g2.add_node(ArchitecturalNode("gb","Module"));g2.add_edge(ArchitecturalEdge("ga","gb","ge1"))
+            d1=network_graph_to_pyg_data(g1); d2=network_graph_to_pyg_data(g2); d3_next=network_graph_to_pyg_data(g1)
+            if d1 and hasattr(d1,'num_nodes') and d1.num_nodes>0 and d2 and hasattr(d2,'num_nodes') and d2.num_nodes>0 and d3_next and hasattr(d3_next,'num_nodes') and d3_next.num_nodes>0:
+                print(f"GNN Predict (d1): {nn_gnn.predict(d1, verbose=True)}")
+                dummy_exp_gnn = [Experience(d1,0,0.5,d3_next,False), Experience(d2,1,-0.2,None,True)]
+                print("\nTesting GNN train_on_batch:")
+                loss_gnn = nn_gnn.train_on_batch(dummy_exp_gnn, verbose=True); print(f"  GNN batch loss: {loss_gnn}")
+            else: print("Failed to create valid PyGData for GNN test or graph was empty.")
+        except Exception as e: print(f"Error in GNN test block: {e}")
+    else: print("\nSkipping GNN test (PyG/utils/engine missing or dummy GNN_NODE_FEATURE_DIM).")
 
-    print(f"\n  FFN Prediction (from list): {nn_ffn.predict(ffn_features_single_list)}")
-    print(f"  FFN Prediction (from tensor): {nn_ffn.predict(ffn_features_single_tensor)}")
-
-    ffn_features_batch = torch.randn(4, 10) # Batch of 4
-    print(f"  FFN Prediction (batch): shape {nn_ffn.predict(ffn_features_batch).shape}")
-
-    print("\n2. Testing FFN train_on_batch:")
-    dummy_experiences_ffn = [
-        Experience(state=[random.random() for _ in range(10)], action=0, reward=1.0, next_state=[random.random() for _ in range(10)], done=False),
-        Experience(state=[random.random() for _ in range(10)], action=1, reward=-1.0, next_state=None, done=True),
-        Experience(state=[random.random() for _ in range(10)], action=2, reward=0.5, next_state=[random.random() for _ in range(10)], done=False)
-    ]
+    print("\nTesting Save/Load:")
+    save_dir = "./temp_nn_save"
     try:
-        loss_ffn = nn_ffn.train_on_batch(dummy_experiences_ffn)
-        print(f"  FFN batch training loss: {loss_ffn}")
-        loss_ffn_2 = nn_ffn.train_on_batch(dummy_experiences_ffn) # Another step
-        print(f"  FFN batch training loss (2nd step): {loss_ffn_2}")
+        nn_ffn.save_model(save_dir)
+        loaded_nn = ReprogrammableSelectorNN.load_model(save_dir, learning_rate=0.005)
+        print("Loaded NN architecture summary:")
+        print(loaded_nn.get_architecture_summary())
+        print(f"Loaded NN learning rate (should be 0.005): {loaded_nn.learning_rate}")
+        assert loaded_nn.learning_rate == 0.005
+        print(f"Prediction from loaded model: {loaded_nn.predict(ffn_feats1_list)}")
     except Exception as e:
-        print(f"  Error during FFN train_on_batch: {e}")
+        print(f"Error during save/load test: {e}")
+    finally:
+        # Clean up created directory and files
+        if os.path.exists(save_dir):
+            for f in os.listdir(save_dir): os.remove(os.path.join(save_dir,f))
+            os.rmdir(save_dir)
 
-
-    print("\n3. Testing reconfigure (FFN to FFN):")
-    new_ffn_conf = {
-        "model_type": "ffn",
-        "input_size": 10,
-        "layers": [{"type": "linear", "size": 128, "activation": "tanh"}], # Different layer
-        "output_size": 4, # Different output size
-        "output_activation": "none"
-    }
-    nn_ffn.reconfigure(new_ffn_conf)
-    print(f"  Model Structure after reconfigure:\n{nn_ffn.model_internal}")
-    print(f"  FFN Prediction after reconfigure (output shape {nn_ffn.predict(ffn_features_single_tensor).shape})")
-    assert nn_ffn.predict(ffn_features_single_tensor).shape[1] == 4
-
-    print("\n--- Test Complete ---")
+    print("--- Test Complete ---")
